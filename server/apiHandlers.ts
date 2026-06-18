@@ -329,6 +329,7 @@ export async function runPaperTradingCycle(options?: { force?: boolean }) {
     run: {
       trades: plan.trades,
       review: plan.review,
+      beforeSummary: beforeResponse.summary,
       scan: {
         provider: scan?.provider ?? "eastmoney-public",
         tradeDate: scan?.tradeDate ?? scanState.date,
