@@ -16,6 +16,9 @@ Fast path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/winter7775/mingyuan/main/deploy/scripts/bootstrap-ubuntu.sh | bash
+cd /opt/mingyuan/trading-system
+bash deploy/scripts/install-cron.sh
+npm run job:daily
 ```
 
 Manual path:
@@ -90,7 +93,14 @@ journalctl -u mingyuan-trading -f
 
 ## cron Daily Job
 
-Install the cron example:
+Install with the helper:
+
+```bash
+cd /opt/mingyuan/trading-system
+bash deploy/scripts/install-cron.sh
+```
+
+Or install the cron example manually:
 
 ```bash
 crontab -e
