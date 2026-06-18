@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.playwright-cli/
+output/
+.codex_tmp/
+__pycache__/
+*.pyc
+data/live-scan-cache.json
+data/portfolio.json
+data/paper-trading.json
+data/paper-scan-state.json
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+vite.config.ts.timestamp-*.mjs

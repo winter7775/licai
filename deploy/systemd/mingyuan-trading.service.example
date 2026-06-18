@@ -1,0 +1,17 @@
+[Unit]
+Description=Mingyuan Trading System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mingyuan/trading-system
+Environment=NODE_ENV=production
+Environment=PORT=4173
+Environment=HOST=0.0.0.0
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,252 @@
+import { describe, expect, it } from "vitest";
+import {
+  alignSpotWithLatestHistory,
+  collectBatchPayloads,
+  collectEastmoneySpotPayloads,
+  collectSinaSpotPayloads,
+  eastmoneySpotPageNumbers,
+  fetchSpotForScreen,
+  historyProviderForSpotMode,
+  latestHistoryTradeDate,
+  pickTopRecommendations,
+  selectHistoryCandidates,
+  sinaSpotPageWorkers
+} from "./eastmoneyProvider";
+import type { LiveScreenedStock } from "./eastmoneyProvider";
+
+describe("eastmoney provider helpers", () => {
+  it("keeps successful batch payloads and reports failed requests", () => {
+    const result = collectBatchPayloads([
+      { ok: true, data: { value: 1 } },
+      { ok: false, error: "socket reset" },
+      { ok: true, data: { value: 2 } }
+    ]);
+
+    expect(result.payloads).toEqual([{ value: 1 }, { value: 2 }]);
+    expect(result.failedCount).toBe(1);
+    expect(result.errors[0]).toContain("socket reset");
+  });
+
+  it("uses the newest history bar as the scan trade date", () => {
+    const analyzed = [
+      { history: [{ date: "2026-06-04" }, { date: "2026-06-05" }] },
+      { history: [{ date: "2026-06-03" }] }
+    ] as LiveScreenedStock[];
+
+    expect(latestHistoryTradeDate(analyzed)).toBe("2026-06-05");
+  });
+
+  it("falls back to a local seed universe when the full-market spot API is unavailable", async () => {
+    const result = await fetchSpotForScreen(
+      async () => {
+        throw new Error("HTTP Error 502: Bad Gateway");
+      },
+      async () => {
+        throw new Error("Sina unavailable");
+      }
+    );
+
+    expect(result.spot.stocks.length).toBeGreaterThan(0);
+    expect(result.spot.stocks[0].symbol).toMatch(/^\d{6}$/);
+    expect(result.warnings[0]).toContain("全市场快照刷新失败");
+    expect(result.warnings[0]).toContain("本地种子池");
+  });
+
+  it("uses Sina full-market spot data before falling back to the local seed universe", async () => {
+    const result = await fetchSpotForScreen(
+      async () => {
+        throw new Error("HTTP Error 502: Bad Gateway");
+      },
+      async () => ({
+        total: 1,
+        stocks: [
+          {
+            symbol: "000725",
+            name: "京东方Ａ",
+            industry: "未分类",
+            price: 6.29,
+            changePct: -2.18,
+            changeAmount: -0.14,
+            volume: 4599875918,
+            amount: 29701641889,
+            turnoverRate: 12.6573,
+            peTtm: 39.31,
+            volumeRatio: 1,
+            high: 6.74,
+            low: 6.22,
+            open: 6.48,
+            previousClose: 6.43,
+            totalMarketCap: 233008823522.56,
+            floatMarketCap: 228589064622.68
+          }
+        ]
+      })
+    );
+
+    expect(result.mode).toBe("sina");
+    expect(result.spot.total).toBe(1);
+    expect(result.spot.stocks[0].symbol).toBe("000725");
+    expect(result.warnings[0]).toContain("东方财富全市场快照失败");
+    expect(result.warnings[0]).toContain("新浪财经");
+  });
+
+  it("rejects a misleading partial Eastmoney snapshot before ranking the top 30 percent", async () => {
+    const partialStocks = Array.from({ length: 100 }, (_, index) => ({
+      symbol: String(index).padStart(6, "0")
+    })) as any[];
+    const fallbackStocks = Array.from({ length: 5_000 }, (_, index) => ({
+      symbol: String(index).padStart(6, "0")
+    })) as any[];
+
+    const result = await fetchSpotForScreen(
+      async () => ({ total: 5_533, stocks: partialStocks }),
+      async () => ({ total: 5_000, stocks: fallbackStocks })
+    );
+
+    expect(result.mode).toBe("sina");
+    expect(result.spot.stocks).toHaveLength(5_000);
+  });
+
+  it("builds all Eastmoney page numbers needed for a capped 100-row endpoint", () => {
+    const pages = eastmoneySpotPageNumbers(5_533, 100);
+
+    expect(pages).toHaveLength(56);
+    expect(pages[0]).toBe(1);
+    expect(pages[55]).toBe(56);
+  });
+
+  it("collects Eastmoney spot pages and removes duplicate symbols", () => {
+    const row = (symbol: string) => ({ f12: symbol, f14: symbol, f2: 10, f6: 300_000_000, f20: 10_000_000_000, f21: 8_000_000_000 });
+    const result = collectEastmoneySpotPayloads([
+      { ok: true, data: { data: { diff: [row("000001"), row("000002")] } } },
+      { ok: true, data: { data: { diff: [row("000002"), row("000003")] } } },
+      { ok: false, error: "timeout" }
+    ]);
+
+    expect(result.stocks.map((stock) => stock.symbol)).toEqual(["000001", "000002", "000003"]);
+    expect(result.failedCount).toBe(1);
+  });
+
+  it("collects successful Sina pages and reports failed pages", () => {
+    const result = collectSinaSpotPayloads([
+      {
+        ok: true,
+        data: [
+          {
+            code: "000725",
+            name: "京东方Ａ",
+            trade: "6.290",
+            pricechange: -0.14,
+            changepercent: -2.177,
+            settlement: "6.430",
+            open: "6.480",
+            high: "6.740",
+            low: "6.220",
+            volume: 4599875918,
+            amount: 29701641889,
+            per: 39.313,
+            mktcap: 23300882.352256,
+            nmc: 22858906.462268,
+            turnoverratio: 12.65731
+          }
+        ]
+      },
+      { ok: false, error: "timeout" }
+    ]);
+
+    expect(result.stocks).toHaveLength(1);
+    expect(result.stocks[0].symbol).toBe("000725");
+    expect(result.errors[0]).toContain("timeout");
+  });
+
+  it("keeps Sina market center page requests on low concurrency because the endpoint rejects larger bursts", () => {
+    expect(sinaSpotPageWorkers()).toBe(3);
+  });
+
+  it("uses Tencent daily history directly after falling back to a non-Eastmoney spot universe", () => {
+    expect(historyProviderForSpotMode("live")).toBe("eastmoney");
+    expect(historyProviderForSpotMode("sina")).toBe("tencent");
+    expect(historyProviderForSpotMode("seed")).toBe("tencent");
+  });
+
+  it("uses the latest history bar as the live price when screening from a fallback seed", () => {
+    const spot = {
+      symbol: "600879",
+      name: "航天电子",
+      industry: "军工电子",
+      price: 10,
+      changePct: 0,
+      changeAmount: 0,
+      volume: 1,
+      amount: 300_000_000,
+      turnoverRate: 1,
+      peTtm: 42,
+      volumeRatio: 1,
+      high: 10,
+      low: 10,
+      open: 10,
+      previousClose: 10,
+      totalMarketCap: 50_000_000_000,
+      floatMarketCap: 50_000_000_000
+    };
+
+    const aligned = alignSpotWithLatestHistory(spot, [
+      {
+        date: "2026-06-08",
+        open: 21.5,
+        close: 21.97,
+        high: 22.1,
+        low: 21.2,
+        volume: 123456,
+        amount: 270_000_000,
+        amplitudePct: 3,
+        changePct: 2.1,
+        changeAmount: 0.45,
+        turnoverRate: 1.4
+      }
+    ]);
+
+    expect(aligned.price).toBe(21.97);
+    expect(aligned.amount).toBe(270_000_000);
+    expect(aligned.changePct).toBe(2.1);
+  });
+
+  it("returns only the requested number of top recommendations after ranking the analyzed pool", () => {
+    const analyzed = Array.from({ length: 15 }, (_, index) => ({
+      spot: { symbol: String(index).padStart(6, "0") },
+      history: [],
+      analysis: { signalType: index % 2 === 0 ? "breakout" : "watch" },
+      score: index
+    })) as LiveScreenedStock[];
+
+    const result = pickTopRecommendations(analyzed, 10);
+
+    expect(result).toHaveLength(10);
+    expect(result[0].analysis.signalType).toBe("breakout");
+    expect(result[0].score).toBe(14);
+  });
+
+  it("limits the daily-history pass after full-market spot prefiltering", () => {
+    const stocks = Array.from({ length: 100 }, (_, index) => ({
+      symbol: String(index).padStart(6, "0")
+    }));
+
+    const result = selectHistoryCandidates(stocks, 80);
+
+    expect(result).toHaveLength(80);
+    expect(result[0].symbol).toBe("000000");
+    expect(result[79].symbol).toBe("000079");
+  });
+
+  it("can page through full-market prefiltered stocks for background paper scans", () => {
+    const stocks = Array.from({ length: 100 }, (_, index) => ({
+      symbol: String(index).padStart(6, "0")
+    }));
+
+    const result = selectHistoryCandidates(stocks, 40, 40);
+
+    expect(result).toHaveLength(40);
+    expect(result[0].symbol).toBe("000040");
+    expect(result[39].symbol).toBe("000079");
+  });
+});

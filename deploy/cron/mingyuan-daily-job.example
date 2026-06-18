@@ -1,0 +1,4 @@
+# Run the daily scan and paper-trading job at 17:10 China time, Monday to Friday.
+# Make sure the server timezone is Asia/Shanghai:
+#   sudo timedatectl set-timezone Asia/Shanghai
+10 17 * * 1-5 cd /opt/mingyuan/trading-system && /usr/bin/npm run job:daily >> output/logs/cron-daily-job.log 2>&1
