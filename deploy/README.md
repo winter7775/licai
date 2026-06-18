@@ -12,11 +12,19 @@ This guide targets one Tencent Cloud lightweight Linux server.
 
 ## First Deploy
 
+Fast path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/winter7775/mingyuan/main/deploy/scripts/bootstrap-ubuntu.sh | bash
+```
+
+Manual path:
+
 ```bash
 sudo mkdir -p /opt/mingyuan
 sudo chown -R "$USER":"$USER" /opt/mingyuan
 cd /opt/mingyuan
-git clone <your-repo-url> trading-system
+git clone https://github.com/winter7775/mingyuan.git trading-system
 cd trading-system
 npm ci
 npm run build
