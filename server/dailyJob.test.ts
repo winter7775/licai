@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runDailyJob } from "./dailyJob";
+import { buildDailyJobMarkdown, runDailyJob, sendWeComMarkdown } from "./dailyJob";
 
 describe("daily cloud job", () => {
   it("runs scan batches until complete then runs paper trading", async () => {
@@ -22,15 +22,20 @@ describe("daily cloud job", () => {
         calls.push("paper");
         return { run: { trades: [{ symbol: "600000" }] }, summary: { exposurePct: 3 } };
       },
+      notify: async () => {
+        calls.push("notify");
+        return true;
+      },
       writeLog: async () => {
         calls.push("log");
       }
     });
 
-    expect(calls).toEqual(["reset", "scan", "scan", "paper", "log"]);
+    expect(calls).toEqual(["reset", "scan", "scan", "paper", "notify", "log"]);
     expect(result.scanCompleted).toBe(true);
     expect(result.paperRan).toBe(true);
     expect(result.tradeCount).toBe(1);
+    expect(result.notificationSent).toBe(true);
   });
 
   it("writes compact log details instead of full scan candidate payloads", async () => {
@@ -42,6 +47,7 @@ describe("daily cloud job", () => {
       resetScan: async () => ({ scanState: { status: "running", analyzedCount: 0 }, candidates: [{ symbol: "600000" }] }),
       scanStep: async () => ({ scanState: { status: "complete", analyzedCount: 40 }, candidates: [{ symbol: "600001" }] }),
       runPaper: async () => ({ run: { trades: [] }, summary: { exposurePct: 0 }, account: { holdings: [] } }),
+      notify: async () => false,
       writeLog: async (_summary, detail) => {
         capturedDetail = detail;
       }
@@ -51,5 +57,46 @@ describe("daily cloud job", () => {
     expect(text).toContain("analyzedCount");
     expect(text).not.toContain("candidates");
     expect(text.length).toBeLessThan(1500);
+  });
+
+  it("formats an enterprise wechat markdown daily report", () => {
+    const markdown = buildDailyJobMarkdown({
+      date: "2026-06-18",
+      scanCompleted: true,
+      scanBatches: 10,
+      analyzedCount: 397,
+      paperRan: true,
+      tradeCount: 1,
+      exposurePct: 2.88,
+      startedAt: "2026-06-18T07:00:00.000Z",
+      finishedAt: "2026-06-18T07:03:00.000Z",
+      notificationSent: false
+    });
+
+    expect(markdown).toContain("明远交易系统日报");
+    expect(markdown).toContain("扫描：397 只 / 10 批");
+    expect(markdown).toContain("模拟盘：已执行");
+    expect(markdown).toContain("当前仓位：2.88%");
+  });
+
+  it("sends enterprise wechat webhook payload", async () => {
+    let capturedUrl = "";
+    let capturedBody = "";
+
+    await sendWeComMarkdown("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test", "hello", async (url, init) => {
+      capturedUrl = url;
+      capturedBody = String(init.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ errcode: 0, errmsg: "ok" })
+      };
+    });
+
+    expect(capturedUrl).toContain("qyapi.weixin.qq.com");
+    expect(JSON.parse(capturedBody)).toEqual({
+      msgtype: "markdown",
+      markdown: { content: "hello" }
+    });
   });
 });

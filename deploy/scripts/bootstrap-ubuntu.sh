@@ -48,4 +48,4 @@ echo
 echo "Deployment complete."
 echo "Open: http://SERVER_IP:4173/"
 echo "Check service: sudo systemctl status mingyuan-trading"
-echo "Run daily job once: cd $APP_DIR && npm run job:daily"
+echo "Run daily job once: cd $APP_DIR && bash deploy/scripts/run-daily-job.sh"

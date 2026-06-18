@@ -18,7 +18,7 @@ Fast path:
 curl -fsSL https://raw.githubusercontent.com/winter7775/licai/main/deploy/scripts/bootstrap-ubuntu.sh | bash
 cd /opt/mingyuan/trading-system
 bash deploy/scripts/install-cron.sh
-npm run job:daily
+bash deploy/scripts/run-daily-job.sh
 ```
 
 Manual path:
@@ -46,7 +46,7 @@ Run once manually after the first deploy:
 
 ```bash
 cd /opt/mingyuan/trading-system
-npm run job:daily
+bash deploy/scripts/run-daily-job.sh
 ```
 
 Expected outputs:
@@ -108,7 +108,21 @@ crontab -e
 
 Paste the line from `deploy/cron/mingyuan-daily-job.example`.
 
-The recommended first schedule is Monday to Friday at `17:10` China time.
+The recommended schedule is Monday to Friday at `15:00` China time, after the A-share close.
+
+## Enterprise WeChat Notification
+
+Create a group bot in Enterprise WeChat and copy its webhook URL. Then save it on the server:
+
+```bash
+cd /opt/mingyuan/trading-system
+cat > .env <<'EOF'
+WEWORK_WEBHOOK_URL='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY'
+EOF
+chmod 600 .env
+```
+
+The daily job reads `.env` through `deploy/scripts/run-daily-job.sh`. If the webhook is not configured, the job still runs and only skips the message.
 
 ## Optional Nginx
 

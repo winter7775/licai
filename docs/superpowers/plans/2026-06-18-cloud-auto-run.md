@@ -292,7 +292,7 @@ Create `deploy/README.md` with commands:
 npm ci
 npm run build
 npm run start
-npm run job:daily
+bash deploy/scripts/run-daily-job.sh
 ```
 
 Document Node 20+, port `4173`, data backup, systemd, cron, and optional Nginx basic auth.

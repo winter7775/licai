@@ -3,6 +3,7 @@ dist/
 .playwright-cli/
 output/
 .codex_tmp/
+.env
 __pycache__/
 *.pyc
 data/live-scan-cache.json

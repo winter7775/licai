@@ -16,7 +16,7 @@ The single server will host:
 - JSON data files under `data/`.
 - Runtime logs under `output/logs/`.
 
-This keeps cost and operations low while the strategy is still being tuned. SQLite, Docker, database backup services, user login, and notification integrations can be added later after the system proves useful for one to two weeks.
+This keeps cost and operations low while the strategy is still being tuned. SQLite, Docker, database backup services, and user login can be added later after the system proves useful for one to two weeks. Notification integrations can be configured through server-side `.env` once the cloud job is installed.
 
 ## Architecture
 
@@ -99,9 +99,9 @@ Add scripts:
 
 Use Linux `cron` or a `systemd` timer.
 
-Recommended first schedule in China time:
+Recommended schedule in China time:
 
-- Monday to Friday at `17:10`.
+- Monday to Friday at `15:00`, after the A-share close.
 - The job may still run on holidays, but it should reuse the latest available trading day data if the market is closed.
 
 Example behavior:
@@ -183,7 +183,7 @@ Manual verification:
 - `npm run build`
 - `npm run start`
 - Open `http://127.0.0.1:4173/`
-- Run `npm run job:daily`
+- Run `bash deploy/scripts/run-daily-job.sh`
 - Confirm `data/paper-trading.json` and `output/logs/` update.
 
 ## Acceptance Criteria
