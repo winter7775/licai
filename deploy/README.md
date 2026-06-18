@@ -15,7 +15,7 @@ This guide targets one Tencent Cloud lightweight Linux server.
 Fast path:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/winter7775/mingyuan/main/deploy/scripts/bootstrap-ubuntu.sh | bash
+curl -fsSL https://raw.githubusercontent.com/winter7775/licai/main/deploy/scripts/bootstrap-ubuntu.sh | bash
 cd /opt/mingyuan/trading-system
 bash deploy/scripts/install-cron.sh
 npm run job:daily
@@ -27,7 +27,7 @@ Manual path:
 sudo mkdir -p /opt/mingyuan
 sudo chown -R "$USER":"$USER" /opt/mingyuan
 cd /opt/mingyuan
-git clone https://github.com/winter7775/mingyuan.git trading-system
+git clone https://github.com/winter7775/licai.git trading-system
 cd trading-system
 npm ci
 npm run build

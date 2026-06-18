@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/winter7775/mingyuan.git}"
+REPO_URL="${REPO_URL:-https://github.com/winter7775/licai.git}"
 APP_DIR="${APP_DIR:-/opt/mingyuan/trading-system}"
 APP_USER="${APP_USER:-$USER}"
 
