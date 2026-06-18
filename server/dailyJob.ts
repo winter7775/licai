@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resetPaperBackgroundScan, runPaperBackgroundScanStep, runPaperTradingCycle } from "./apiHandlers";
+import { readPaperBackgroundScan, resetPaperBackgroundScan, runPaperBackgroundScanStep, runPaperTradingCycle } from "./apiHandlers";
 
 const DEFAULT_BATCH_SIZE = 40;
 const DEFAULT_MAX_BATCHES = 10;
@@ -11,6 +11,7 @@ type ScanStatus = "idle" | "running" | "complete" | "error";
 
 interface ScanResponseLike {
   scanState?: {
+    date?: string;
     status?: ScanStatus | string;
     analyzedCount?: number;
     cursor?: number;
@@ -113,6 +114,7 @@ export interface DailyJobDeps {
   now: Date;
   batchSize: number;
   maxBatches: number;
+  loadScan: () => Promise<ScanResponseLike>;
   resetScan: () => Promise<ScanResponseLike>;
   scanStep: (batchSize: number) => Promise<ScanResponseLike>;
   runPaper: () => Promise<PaperRunLike>;
@@ -139,6 +141,10 @@ function shanghaiDateString(now: Date): string {
 
 function isScanComplete(response: ScanResponseLike): boolean {
   return response.scanState?.status === "complete";
+}
+
+function isSameDayCompleteScan(response: ScanResponseLike, date: string): boolean {
+  return isScanComplete(response) && response.scanState?.date === date;
 }
 
 function analyzedCount(response: ScanResponseLike): number {
@@ -222,6 +228,7 @@ function compactDetail(step: string, response: ScanResponseLike | PaperRunLike) 
       step,
       scanState: {
         status: response.scanState?.status ?? "unknown",
+        date: response.scanState?.date ?? "unknown",
         analyzedCount: response.scanState?.analyzedCount ?? 0,
         cursor: response.scanState?.cursor ?? 0
       }
@@ -360,12 +367,13 @@ function defaultDeps(input?: Partial<DailyJobDeps>): DailyJobDeps {
     now: input?.now ?? new Date(),
     batchSize: input?.batchSize ?? DEFAULT_BATCH_SIZE,
     maxBatches: input?.maxBatches ?? DEFAULT_MAX_BATCHES,
+    loadScan: input?.loadScan ?? (() => readPaperBackgroundScan() as Promise<ScanResponseLike>),
     resetScan: input?.resetScan ?? (() => resetPaperBackgroundScan() as Promise<ScanResponseLike>),
     scanStep:
       input?.scanStep ??
       ((batchSize: number) =>
         runPaperBackgroundScanStep(new URL(`http://127.0.0.1/api/paper-trading/background-scan/step?batch=${batchSize}`)) as Promise<ScanResponseLike>),
-    runPaper: input?.runPaper ?? (() => runPaperTradingCycle({ force: true }) as Promise<PaperRunLike>),
+    runPaper: input?.runPaper ?? (() => runPaperTradingCycle({ force: true, oncePerDay: true }) as Promise<PaperRunLike>),
     notify:
       input?.notify ??
       (async (summary) => {
@@ -383,14 +391,19 @@ export async function runDailyJob(input?: Partial<DailyJobDeps>): Promise<DailyJ
   const startedAt = deps.now.toISOString();
   const date = shanghaiDateString(deps.now);
   const details: unknown[] = [];
-  let scanResponse = await deps.resetScan();
-  details.push(compactDetail("resetScan", scanResponse));
+  let scanResponse = await deps.loadScan();
+  details.push(compactDetail("loadScan", scanResponse));
   let scanBatches = 0;
 
-  while (!isScanComplete(scanResponse) && scanBatches < deps.maxBatches) {
-    scanResponse = await deps.scanStep(deps.batchSize);
-    details.push(compactDetail("scanStep", scanResponse));
-    scanBatches += 1;
+  if (!isSameDayCompleteScan(scanResponse, date)) {
+    scanResponse = await deps.resetScan();
+    details.push(compactDetail("resetScan", scanResponse));
+
+    while (!isScanComplete(scanResponse) && scanBatches < deps.maxBatches) {
+      scanResponse = await deps.scanStep(deps.batchSize);
+      details.push(compactDetail("scanStep", scanResponse));
+      scanBatches += 1;
+    }
   }
 
   let paperResponse: PaperRunLike | null = null;

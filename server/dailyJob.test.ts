@@ -9,6 +9,10 @@ describe("daily cloud job", () => {
     const result = await runDailyJob({
       now: new Date("2026-06-18T17:10:00+08:00"),
       maxBatches: 3,
+      loadScan: async () => {
+        calls.push("load");
+        return { scanState: { date: "2026-06-18", status: "idle", analyzedCount: 0, cursor: 0 } };
+      },
       resetScan: async () => {
         calls.push("reset");
         return { scanState: { status: "running", analyzedCount: 0, cursor: 0 } };
@@ -57,7 +61,7 @@ describe("daily cloud job", () => {
       }
     });
 
-    expect(calls).toEqual(["reset", "scan", "scan", "paper", "notify", "log"]);
+    expect(calls).toEqual(["load", "reset", "scan", "scan", "paper", "notify", "log"]);
     expect(result.scanCompleted).toBe(true);
     expect(result.paperRan).toBe(true);
     expect(result.tradeCount).toBe(1);
@@ -66,12 +70,52 @@ describe("daily cloud job", () => {
     expect(result.notificationSent).toBe(true);
   });
 
+  it("reuses an already completed same-day scan instead of resetting and rescanning", async () => {
+    const calls: string[] = [];
+
+    const result = await runDailyJob({
+      now: new Date("2026-06-18T17:10:00+08:00"),
+      loadScan: async () => {
+        calls.push("load");
+        return { scanState: { date: "2026-06-18", status: "complete", analyzedCount: 397, cursor: 400 } };
+      },
+      resetScan: async () => {
+        calls.push("reset");
+        return { scanState: { status: "running", analyzedCount: 0, cursor: 0 } };
+      },
+      scanStep: async () => {
+        calls.push("scan");
+        return { scanState: { status: "complete", analyzedCount: 40, cursor: 40 } };
+      },
+      runPaper: async () => {
+        calls.push("paper");
+        return {
+          run: { beforeSummary: { totalAssets: 200000 }, trades: [] },
+          summary: { totalAssets: 200000, totalReturn: 0, totalReturnPct: 0, exposurePct: 0, holdings: [] }
+        };
+      },
+      notify: async () => {
+        calls.push("notify");
+        return true;
+      },
+      writeLog: async () => {
+        calls.push("log");
+      }
+    });
+
+    expect(calls).toEqual(["load", "paper", "notify", "log"]);
+    expect(result.scanCompleted).toBe(true);
+    expect(result.scanBatches).toBe(0);
+    expect(result.analyzedCount).toBe(397);
+  });
+
   it("writes compact log details instead of full scan candidate payloads", async () => {
     let capturedDetail: unknown = null;
 
     await runDailyJob({
       now: new Date("2026-06-18T17:10:00+08:00"),
       maxBatches: 1,
+      loadScan: async () => ({ scanState: { date: "2026-06-18", status: "idle", analyzedCount: 0 } }),
       resetScan: async () => ({ scanState: { status: "running", analyzedCount: 0 }, candidates: [{ symbol: "600000" }] }),
       scanStep: async () => ({ scanState: { status: "complete", analyzedCount: 40 }, candidates: [{ symbol: "600001" }] }),
       runPaper: async () => ({ run: { trades: [] }, summary: { exposurePct: 0 }, account: { holdings: [] } }),

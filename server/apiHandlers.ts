@@ -297,9 +297,28 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
   };
 }
 
-export async function runPaperTradingCycle(options?: { force?: boolean }) {
+export function hasPaperReviewForDate(account: PaperAccount, date: string): boolean {
+  return account.reviews.some((review) => review.date === date);
+}
+
+export async function runPaperTradingCycle(options?: { force?: boolean; oncePerDay?: boolean }) {
   const account = await readPaperTradingDb(PAPER_TRADING_DB_PATH);
   const beforeResponse = await buildPaperTradingResponse(account, { forceQuote: options?.force });
+  const tradeDate = shanghaiDateString();
+  const existingReview = account.reviews.find((review) => review.date === tradeDate);
+  if (options?.oncePerDay && existingReview) {
+    return {
+      ...beforeResponse,
+      run: {
+        trades: [],
+        review: existingReview,
+        beforeSummary: beforeResponse.summary,
+        skipped: true,
+        skipReason: "paper trading already reviewed for this date"
+      }
+    };
+  }
+
   const singleNameMaxPct =
     beforeResponse.summary.holdings.length > 0 ? Math.max(...beforeResponse.summary.holdings.map((holding) => holding.weightPct)) : 0;
   const position = await getPositionStatusResponse(
@@ -354,6 +373,11 @@ async function buildPaperTradingResponseWithScanState(scanState: PaperScanState)
     ...response,
     scanState
   };
+}
+
+export async function readPaperBackgroundScan() {
+  const state = await readCurrentPaperScanState();
+  return buildPaperTradingResponseWithScanState(state);
 }
 
 export async function resetPaperBackgroundScan() {

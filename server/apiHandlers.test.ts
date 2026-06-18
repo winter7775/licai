@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleApiRequest } from "./apiHandlers";
+import { handleApiRequest, hasPaperReviewForDate } from "./apiHandlers";
 
 function createMockResponse() {
   return {
@@ -41,5 +41,31 @@ describe("shared api handlers", () => {
       provider: "eastmoney-public",
       ready: true
     });
+  });
+
+  it("detects whether the paper account has already been reviewed for a trading date", () => {
+    expect(
+      hasPaperReviewForDate(
+        {
+          initialCapital: 200000,
+          cash: 200000,
+          holdings: [],
+          trades: [],
+          updatedAt: "2026-06-18T07:00:00.000Z",
+          reviews: [
+            {
+              id: "review-2026-06-18",
+              date: "2026-06-18",
+              actionSummary: "无新增交易",
+              marketGate: "防守观察",
+              targetExposurePct: 35,
+              decisions: [],
+              createdAt: "2026-06-18T07:00:00.000Z"
+            }
+          ]
+        },
+        "2026-06-18"
+      )
+    ).toBe(true);
   });
 });
