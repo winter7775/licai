@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { mapCyclePositionToPositionStatus } from "./positionStatusProvider";
+import { fallbackCyclePosition, mapCyclePositionToPositionStatus } from "./positionStatusProvider";
 
 describe("position status provider", () => {
+  it("provides a conservative fallback cycle snapshot when cloud refresh files are unavailable", () => {
+    const fallback = fallbackCyclePosition();
+
+    expect(fallback.metrics.target_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(fallback.classification.suggested_position_pct).toBe("20%-35%");
+    expect(fallback.classification.phase).toContain("云端");
+  });
+
   it("maps refreshed cycle data and portfolio exposure into a position gate", () => {
     const status = mapCyclePositionToPositionStatus(
       {

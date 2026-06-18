@@ -5,13 +5,14 @@ import path from "node:path";
 import { buildRetailSentimentFromCycle } from "../src/domain/sentimentScoring";
 import { parsePositionBand, resolvePositionGate } from "../src/domain/positionControl";
 import type { MarketCycleSnapshot, PositionStatus } from "../src/domain/types";
+import { resolvePythonExecutable } from "./pythonRuntime";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(SERVER_DIR, "..");
 const ROOT_DIR = path.resolve(APP_DIR, "../..");
 const SIGNALS_DIR = path.resolve(ROOT_DIR, "quant/signals");
 const MARKET_CYCLE_SCRIPT = path.resolve(ROOT_DIR, "scripts/market_cycle_position.py");
-const PYTHON_EXE = path.resolve(ROOT_DIR, ".codex_tmp/whisper-venv/Scripts/python.exe");
+const PYTHON_EXE = resolvePythonExecutable({ rootDir: ROOT_DIR });
 
 export interface PortfolioExposureSummary {
   exposurePct: number;
@@ -29,6 +30,48 @@ export interface PositionStatusResponse {
 }
 
 type RawCyclePosition = Record<string, any>;
+
+function shanghaiDateString(now = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(now);
+}
+
+export function fallbackCyclePosition(now = new Date()): RawCyclePosition {
+  const targetDate = shanghaiDateString(now);
+  return {
+    metrics: {
+      target_date: targetDate,
+      indices: {
+        sh: { close: 0, one_year_position_pct: 75, drawdown_from_high_pct: 0, returns: {} },
+        cyb: { close: 0, one_year_position_pct: 75, drawdown_from_high_pct: 0, returns: {} },
+        hs300: { close: 0, one_year_position_pct: 75, drawdown_from_high_pct: 0, returns: {} },
+        zz1000: { close: 0, one_year_position_pct: 75, drawdown_from_high_pct: 0, returns: {} }
+      },
+      turnover: { total_turnover_yi: 0, ratios: {} },
+      market_width: {
+        limit_up_count: 0,
+        limit_down_count: 0,
+        failed_limit_up_count: 0,
+        limit_up_open_failure_rate: 0.35,
+        highest_consecutive_limit: 0,
+        top_industries: []
+      },
+      margin_change_pct: 0
+    },
+    classification: {
+      phase: "云端保守兜底",
+      cycle_anchor: "市场情绪刷新失败",
+      composite_position_pct: 75,
+      short_term_state: "云端保守兜底",
+      position_band: "防守",
+      suggested_position_pct: "20%-35%",
+      action: "仅允许模拟盘小仓位试错",
+      confidence: "低",
+      risk_triggers: ["云端未取得本地RHI/市场周期文件"],
+      add_triggers: [],
+      missing: ["market_cycle_position 数据缺失"]
+    }
+  };
+}
 
 function numberValue(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -235,15 +278,19 @@ export async function getPositionStatusResponse(
   }
 
   if (!filePath) {
-    filePath = await latestCycleFile();
+    try {
+      filePath = await latestCycleFile();
+    } catch (error) {
+      warnings.push(`本地市场情绪文件缺失，使用云端保守兜底：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
-  const raw = await readCycleFile(filePath);
+  const raw = filePath ? await readCycleFile(filePath) : fallbackCyclePosition();
   return {
     status: mapCyclePositionToPositionStatus(raw, portfolio),
     source: {
       mode,
-      file: filePath,
+      file: filePath || "cloud-fallback",
       refreshedAt: new Date().toISOString(),
       warnings
     }

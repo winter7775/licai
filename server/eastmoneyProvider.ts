@@ -15,6 +15,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { resolvePythonExecutable } from "./pythonRuntime";
 
 const EASTMONEY_SPOT_URL = "https://push2.eastmoney.com/api/qt/clist/get";
 const EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
@@ -26,7 +27,8 @@ const EASTMONEY_SPOT_PAGE_WORKERS = 4;
 const TENCENT_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get";
 const CACHE_TTL_MS = 3 * 60 * 1000;
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
-const PYTHON_EXE = path.resolve(SERVER_DIR, "../../../.codex_tmp/whisper-venv/Scripts/python.exe");
+const APP_DIR = path.resolve(SERVER_DIR, "..");
+const PYTHON_EXE = resolvePythonExecutable({ rootDir: APP_DIR });
 const PYTHON_BRIDGE = path.resolve(SERVER_DIR, "eastmoney_bridge.py");
 const SCAN_CACHE_FILE = path.resolve(SERVER_DIR, "../data/live-scan-cache.json");
 const DEFAULT_MARKET_CAP_TOP_PCT = 0.3;
