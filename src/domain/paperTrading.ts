@@ -300,17 +300,15 @@ function isTrialCandidate(candidate: PaperCandidate): boolean {
   if (!rulePassed(candidate, "risk.stop_loss_width")) return false;
 
   const platformReady = rulePassed(candidate, "base.range") && platformQualityPassCount(candidate) >= 2;
-  const platformNearlyReady = rulePassed(candidate, "base.range") && platformQualityPassCount(candidate) >= 1;
-  const breakoutPassed = rulePassed(candidate, "buy.breakout");
   const breakout = parseBreakoutActual(candidate);
   const nearBreakout =
     breakout.extensionPct !== null &&
     breakout.volumeRatio !== null &&
-    breakout.extensionPct >= -8 &&
-    breakout.extensionPct <= 8 &&
-    breakout.volumeRatio >= 0.8;
+    breakout.extensionPct >= -3 &&
+    breakout.extensionPct <= 3 &&
+    breakout.volumeRatio >= 0.9;
 
-  return (platformReady && nearBreakout) || (breakoutPassed && platformNearlyReady);
+  return platformReady && nearBreakout;
 }
 
 function trialExposureAmount(summary: PaperAccountSummary): number {

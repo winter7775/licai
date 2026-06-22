@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleApiRequest, hasPaperReviewForDate } from "./apiHandlers";
+import { fillMissingPaperQuotePrices, handleApiRequest, hasPaperReviewForDate } from "./apiHandlers";
 
 function createMockResponse() {
   return {
@@ -67,5 +67,21 @@ describe("shared api handlers", () => {
         "2026-06-18"
       )
     ).toBe(true);
+  });
+
+  it("fills missing paper holding quotes from latest daily history close", async () => {
+    const result = await fillMissingPaperQuotePrices(["002179", "600961"], { "600961": 29 }, async (symbol) => {
+      if (symbol === "002179") {
+        return [
+          { date: "2026-06-19", close: 42.73 },
+          { date: "2026-06-22", close: 44.12 }
+        ] as any;
+      }
+      return [];
+    });
+
+    expect(result.quotes).toEqual({ "002179": 44.12, "600961": 29 });
+    expect(result.filledSymbols).toEqual(["002179"]);
+    expect(result.missingSymbols).toEqual([]);
   });
 });

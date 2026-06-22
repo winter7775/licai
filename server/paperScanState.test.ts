@@ -55,12 +55,60 @@ function batch(overrides: Partial<LiveScanResponse> = {}): LiveScanResponse {
           ma120: 8.8,
           rules: [
             {
+              id: "liquidity.prefilter",
+              name: "liquidity",
+              actual: "pass",
+              threshold: "pass",
+              passed: true,
+              severity: "hard"
+            },
+            {
+              id: "trend.template",
+              name: "trend",
+              actual: "pass",
+              threshold: "pass",
+              passed: true,
+              severity: "hard"
+            },
+            {
+              id: "base.range",
+              name: "base width",
+              actual: "13%",
+              threshold: "ok",
+              passed: true,
+              severity: "soft"
+            },
+            {
+              id: "base.volume_contraction",
+              name: "volume",
+              actual: "pass",
+              threshold: "ok",
+              passed: true,
+              severity: "soft"
+            },
+            {
+              id: "base.atr_contraction",
+              name: "atr",
+              actual: "pass",
+              threshold: "ok",
+              passed: true,
+              severity: "soft"
+            },
+            {
+              id: "risk.stop_loss_width",
+              name: "stop width",
+              actual: "7%",
+              threshold: "ok",
+              passed: true,
+              severity: "hard"
+            },
+            {
               id: "buy.breakout",
               name: "breakout",
-              actual: "extension -2%",
+              actual: "偏离-2% / 量比1.0",
               threshold: "1%-7%",
               passed: false,
-              severity: "hard"
+              severity: "info"
             }
           ]
         }

@@ -232,9 +232,13 @@ describe("paper trading auto plan", () => {
   });
 
   it("opens small B-grade trial positions when only the buy confirmation is missing", () => {
+    const nearBreakoutRules = trialCandidate().rules?.map((item) =>
+      item.id === "buy.breakout" ? { ...item, actual: "偏离-1.2% / 量比0.97" } : item
+    );
+
     const result = generatePaperTradingPlan({
       account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
-      candidates: [trialCandidate({ price: 20 })],
+      candidates: [trialCandidate({ price: 20, rules: nearBreakoutRules })],
       position: defensiveBandPosition,
       tradedAt: "2026-06-09T15:10:00.000Z"
     });
@@ -260,10 +264,30 @@ describe("paper trading auto plan", () => {
     expect(result.trades).toEqual([]);
   });
 
-  it("caps B-grade trial exposure at ten percent even with many trial candidates", () => {
+  it("does not use B-grade trial entries when the setup is still seven percent below pivot", () => {
+    const farBelowRules = trialCandidate().rules?.map((item) =>
+      item.id === "buy.breakout" ? { ...item, actual: "偏离-7.01% / 量比0.99" } : item
+    );
+
     const result = generatePaperTradingPlan({
       account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
-      candidates: Array.from({ length: 8 }, (_, index) => trialCandidate({ symbol: String(600100 + index), price: 20, score: 90 - index })),
+      candidates: [trialCandidate({ rules: farBelowRules })],
+      position: defensiveBandPosition,
+      tradedAt: "2026-06-09T15:10:00.000Z"
+    });
+
+    expect(result.trades).toEqual([]);
+  });
+
+  it("caps B-grade trial exposure at ten percent even with many trial candidates", () => {
+    const nearBreakoutRules = trialCandidate().rules?.map((item) =>
+      item.id === "buy.breakout" ? { ...item, actual: "偏离-1.2% / 量比0.97" } : item
+    );
+    const result = generatePaperTradingPlan({
+      account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      candidates: Array.from({ length: 8 }, (_, index) =>
+        trialCandidate({ symbol: String(600100 + index), price: 20, score: 90 - index, rules: nearBreakoutRules })
+      ),
       position: normalPosition,
       tradedAt: "2026-06-09T15:10:00.000Z"
     });

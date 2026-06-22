@@ -185,6 +185,34 @@ export function shouldFetchPaperQuotes(symbols: string[]): boolean {
   return symbols.length > 0;
 }
 
+export async function fillMissingPaperQuotePrices(
+  symbols: string[],
+  quotes: Record<string, number>,
+  historyProvider: typeof fetchStockHistory = fetchStockHistory
+): Promise<{ quotes: Record<string, number>; filledSymbols: string[]; missingSymbols: string[] }> {
+  const nextQuotes = { ...quotes };
+  const filledSymbols: string[] = [];
+  const missingSymbols: string[] = [];
+
+  for (const symbol of Array.from(new Set(symbols))) {
+    if (nextQuotes[symbol] && nextQuotes[symbol] > 0) continue;
+    try {
+      const history = await historyProvider(symbol, 20);
+      const latestClose = history[history.length - 1]?.close;
+      if (latestClose && latestClose > 0) {
+        nextQuotes[symbol] = latestClose;
+        filledSymbols.push(symbol);
+      } else {
+        missingSymbols.push(symbol);
+      }
+    } catch {
+      missingSymbols.push(symbol);
+    }
+  }
+
+  return { quotes: nextQuotes, filledSymbols, missingSymbols };
+}
+
 export function paperCandidateFromLiveStock(item: LiveScreenedStock): PaperCandidate {
   const hardRulesPassed = !item.analysis.rules.some((rule) => rule.severity === "hard" && !rule.passed);
   return {
@@ -283,6 +311,17 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
     }
   } catch (error) {
     warnings.push(`模拟盘现价刷新失败，暂用成本价估算：${errorMessage(error)}`);
+  }
+
+  if (shouldFetchPaperQuotes(holdingSymbols)) {
+    const filled = await fillMissingPaperQuotePrices(holdingSymbols, quotes);
+    quotes = filled.quotes;
+    if (filled.filledSymbols.length > 0) {
+      warnings.push(`部分持仓实时现价缺失，已使用最近日线收盘价估值：${filled.filledSymbols.join(", ")}`);
+    }
+    if (filled.missingSymbols.length > 0) {
+      warnings.push(`部分持仓仍缺少行情，暂用成本价估算：${filled.missingSymbols.join(", ")}`);
+    }
   }
 
   return {

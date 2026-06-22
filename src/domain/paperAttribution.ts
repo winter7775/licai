@@ -71,13 +71,45 @@ function hardPassed(candidate: PaperAttributionCandidate): boolean {
   return hardFailures(candidate).length === 0;
 }
 
+function rulePassed(candidate: PaperAttributionCandidate, id: string): boolean {
+  return candidate.rules.find((rule) => rule.id === id)?.passed === true;
+}
+
+function platformQualityPassCount(candidate: PaperAttributionCandidate): number {
+  return ["base.volume_contraction", "base.atr_contraction", "base.volatility_contraction"].filter((id) => rulePassed(candidate, id)).length;
+}
+
+function parseBreakoutActual(candidate: PaperAttributionCandidate): { extensionPct: number | null; volumeRatio: number | null } {
+  const actual = String(candidate.rules.find((rule) => rule.id === "buy.breakout")?.actual ?? "");
+  const numbers = Array.from(actual.matchAll(/-?\d+(?:\.\d+)?/g)).map((match) => Number(match[0])).filter((value) => Number.isFinite(value));
+  return {
+    extensionPct: numbers[0] ?? null,
+    volumeRatio: numbers[1] ?? null
+  };
+}
+
 function isStrictEligible(candidate: PaperAttributionCandidate): boolean {
   return candidate.price > 0 && candidate.signalType !== "watch" && hardPassed(candidate);
 }
 
 function isRelaxedEligible(candidate: PaperAttributionCandidate, failures: RuleResult[]): boolean {
-  if (candidate.price <= 0 || failures.length === 0 || failures.length > 2) return false;
-  return !failures.some((rule) => CRITICAL_RULE_IDS.has(rule.id));
+  if (candidate.price <= 0 || failures.length !== 1) return false;
+  if (failures[0].id !== "buy.breakout") return false;
+  if (failures.some((rule) => CRITICAL_RULE_IDS.has(rule.id))) return false;
+  if (!hardPassed(candidate)) return false;
+  if (!rulePassed(candidate, "trend.template")) return false;
+  if (!rulePassed(candidate, "risk.stop_loss_width")) return false;
+  if (!rulePassed(candidate, "base.range")) return false;
+  if (platformQualityPassCount(candidate) < 2) return false;
+
+  const breakout = parseBreakoutActual(candidate);
+  return (
+    breakout.extensionPct !== null &&
+    breakout.volumeRatio !== null &&
+    breakout.extensionPct >= -3 &&
+    breakout.extensionPct <= 3 &&
+    breakout.volumeRatio >= 0.9
+  );
 }
 
 function actualText(value: string | number): string {
