@@ -83,6 +83,8 @@ function trialCandidate(overrides: Partial<PaperCandidate> = {}): PaperCandidate
     rules: [
       rule("liquidity.prefilter", true, "ok", "hard"),
       rule("trend.template", true, "ok", "hard"),
+      rule("quality.valuation", true, "PE TTM 42", "hard"),
+      rule("relative_strength", true, "RS20 1% / RS60 2%", "hard"),
       rule("base.range", true),
       rule("base.volume_contraction", true),
       rule("base.atr_contraction", true),
@@ -293,6 +295,25 @@ describe("paper trading auto plan", () => {
     const result = generatePaperTradingPlan({
       account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
       candidates: [trialCandidate({ rules: farBelowRules })],
+      position: defensiveBandPosition,
+      tradedAt: "2026-06-09T15:10:00.000Z"
+    });
+
+    expect(result.trades).toEqual([]);
+  });
+
+  it("does not use B-grade trial entries when relative strength is weak", () => {
+    const weakRsRules = trialCandidate().rules?.map((item) =>
+      item.id === "relative_strength"
+        ? { ...item, passed: false, actual: "RS20 -3% / RS60 -5%" }
+        : item.id === "buy.breakout"
+          ? { ...item, actual: "偏离-1.2% / 量比0.97" }
+          : item
+    );
+
+    const result = generatePaperTradingPlan({
+      account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      candidates: [trialCandidate({ rules: weakRsRules })],
       position: defensiveBandPosition,
       tradedAt: "2026-06-09T15:10:00.000Z"
     });

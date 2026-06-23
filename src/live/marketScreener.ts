@@ -49,6 +49,10 @@ export interface HistoryAnalysis {
   rules: RuleResult[];
 }
 
+export interface AnalyzeHistoryOptions {
+  benchmarkBars?: DailyBar[];
+}
+
 function numberValue(value: unknown): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -80,6 +84,11 @@ function min(values: number[]): number {
 function percentageChange(current: number, previous: number): number {
   if (previous === 0) return 0;
   return ((current / previous) - 1) * 100;
+}
+
+function periodReturnPct(bars: DailyBar[], days: number): number {
+  if (bars.length <= days) return 0;
+  return percentageChange(bars[bars.length - 1].close, bars[bars.length - 1 - days].close);
 }
 
 function closeLocation(bar: DailyBar): number {
@@ -379,7 +388,7 @@ function findPullbackSignal(bars: DailyBar[], current: DailyBar): { passed: bool
   return { passed: false, pivot: 0, breakoutIndex: -1 };
 }
 
-export function analyzeHistory(stock: SpotStock, bars: DailyBar[]): HistoryAnalysis {
+export function analyzeHistory(stock: SpotStock, bars: DailyBar[], options: AnalyzeHistoryOptions = {}): HistoryAnalysis {
   if (bars.length < 120) {
     throw new Error(`${stock.symbol} history requires at least 120 daily bars`);
   }
@@ -427,6 +436,14 @@ export function analyzeHistory(stock: SpotStock, bars: DailyBar[]): HistoryAnaly
   const platformAtrPassed = atrRatio <= 1.1;
   const platformVolatilityPassed = volatilityRatio <= 1.05;
   const platformSetup = evaluatePlatformSetup({ baseRangePct, volumeRatio, atrRatio, volatilityRatio });
+  const valuationPassed = stock.peTtm > 0 && stock.peTtm <= 80;
+  const stockReturn20 = periodReturnPct(bars, 20);
+  const stockReturn60 = periodReturnPct(bars, 60);
+  const benchmarkReturn20 = options.benchmarkBars ? periodReturnPct(options.benchmarkBars, 20) : 0;
+  const benchmarkReturn60 = options.benchmarkBars ? periodReturnPct(options.benchmarkBars, 60) : 0;
+  const relativeStrength20 = stockReturn20 - benchmarkReturn20;
+  const relativeStrength60 = stockReturn60 - benchmarkReturn60;
+  const relativeStrengthPassed = options.benchmarkBars ? relativeStrength20 >= 0 && relativeStrength60 >= 0 : true;
   const breakoutPassed = isBreakoutConfirmation({
     extensionPct: percentageChange(current.close, pivotPrice),
     volume20Ratio: averageVolume20 === 0 ? 0 : current.volume / averageVolume20,
@@ -436,9 +453,9 @@ export function analyzeHistory(stock: SpotStock, bars: DailyBar[]): HistoryAnaly
   });
   const pullback = findPullbackSignal(bars, current);
   const signalType: SignalType =
-    trendPassed && platformSetup.passed && breakoutPassed
+    valuationPassed && relativeStrengthPassed && trendPassed && platformSetup.passed && breakoutPassed
       ? "breakout"
-      : trendPassed && pullback.passed
+      : valuationPassed && relativeStrengthPassed && trendPassed && pullback.passed
         ? "pullback"
         : "watch";
   const effectivePivot = signalType === "pullback" && pullback.pivot > 0 ? pullback.pivot : pivotPrice;
@@ -468,6 +485,26 @@ export function analyzeHistory(stock: SpotStock, bars: DailyBar[]): HistoryAnaly
       passed: trendPassed,
       severity: "hard",
       explanation: "只保留已形成右侧中期趋势的标的。"
+    },
+    {
+      id: "quality.valuation",
+      name: "估值质量",
+      actual: `PE TTM ${round(stock.peTtm, 1)}`,
+      threshold: "0 < PE TTM <= 80",
+      passed: valuationPassed,
+      severity: "hard",
+      explanation: "第一版基本面质量先使用公开快照中稳定可得的 PE TTM，排除亏损和极端高估值标的。"
+    },
+    {
+      id: "relative_strength",
+      name: "相对强弱",
+      actual: options.benchmarkBars
+        ? `RS20 ${round(relativeStrength20)}% / RS60 ${round(relativeStrength60)}%`
+        : "基准未接入",
+      threshold: "RS20 >= 0 且 RS60 >= 0",
+      passed: relativeStrengthPassed,
+      severity: options.benchmarkBars ? "hard" : "info",
+      explanation: "要求个股近20日和60日表现不弱于沪深300基准，优先选择真正跑赢市场的右侧标的。"
     },
     {
       id: "base.range",

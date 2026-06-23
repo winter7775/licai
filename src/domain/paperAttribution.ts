@@ -98,6 +98,8 @@ function isRelaxedEligible(candidate: PaperAttributionCandidate, failures: RuleR
   if (failures.some((rule) => CRITICAL_RULE_IDS.has(rule.id))) return false;
   if (!hardPassed(candidate)) return false;
   if (!rulePassed(candidate, "trend.template")) return false;
+  if (!rulePassed(candidate, "quality.valuation")) return false;
+  if (!rulePassed(candidate, "relative_strength")) return false;
   if (!rulePassed(candidate, "risk.stop_loss_width")) return false;
   if (!rulePassed(candidate, "base.range")) return false;
   if (platformQualityPassCount(candidate) < 2) return false;

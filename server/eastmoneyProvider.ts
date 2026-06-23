@@ -34,9 +34,14 @@ const SCAN_CACHE_FILE = path.resolve(SERVER_DIR, "../data/live-scan-cache.json")
 const DEFAULT_MARKET_CAP_TOP_PCT = 0.3;
 const DEFAULT_INITIAL_POOL_LIMIT = 400;
 const DEFAULT_CORE_POOL_LIMIT = 400;
+const CSI300_SECID = "1.000300";
 
 function shanghaiDateString(now = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(now);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface LiveScreenedStock {
@@ -462,10 +467,20 @@ export async function fetchStockHistory(symbol: string, limit = 260): Promise<Da
   return parseTencentHistoryResponse(response, symbol);
 }
 
+export async function fetchBenchmarkHistory(limit = 260): Promise<DailyBar[]> {
+  const response = await fetchJson(historyUrlBySecId(CSI300_SECID, limit));
+  const lines = Array.isArray(response.data?.klines) ? response.data.klines : [];
+  return lines.map((line: string) => parseEastmoneyKline(line));
+}
+
 function historyUrl(symbol: string, limit = 260): URL {
+  return historyUrlBySecId(secId(symbol), limit);
+}
+
+function historyUrlBySecId(secid: string, limit = 260): URL {
   const url = new URL(EASTMONEY_HISTORY_URL);
   url.search = new URLSearchParams({
-    secid: secId(symbol),
+    secid,
     klt: "101",
     fqt: "1",
     lmt: String(limit),
@@ -630,6 +645,13 @@ export async function runLiveScreen(options?: {
     rotationSeed: shanghaiDateString()
   });
   const historyCandidates = selectHistoryCandidates(prefiltered, options?.historyLimit, options?.historyOffset);
+  let benchmarkBars: DailyBar[] | undefined;
+  const benchmarkWarnings: string[] = [];
+  try {
+    benchmarkBars = await fetchBenchmarkHistory();
+  } catch (error) {
+    benchmarkWarnings.push(`沪深300基准日线获取失败，RS相对强弱规则本轮降级：${errorText(error)}`);
+  }
   const historyBatch = await fetchHistories(historyCandidates, historyProviderForSpotMode(spotResult.mode));
   const analyzed: LiveScreenedStock[] = [];
   let failedCount = historyBatch.failedCount;
@@ -637,7 +659,7 @@ export async function runLiveScreen(options?: {
   for (const result of historyBatch.rows) {
     try {
       const stock = alignSpotWithLatestHistory(result.stock, result.history);
-      const analysis = analyzeHistory(stock, result.history);
+      const analysis = analyzeHistory(stock, result.history, { benchmarkBars });
       analyzed.push({
         spot: stock,
         history: result.history,
@@ -684,6 +706,7 @@ export async function runLiveScreen(options?: {
     candidates,
     warnings: [
       ...spotWarnings,
+      ...benchmarkWarnings,
       "公开行情接口无正式稳定性承诺，页面保留本地演示数据作为降级方案。",
       "当前扫描未接入财报中的扣非净利润、营收增速、商誉等字段。",
       latestTradeDate ? `行情日期来自最近可取得的交易日：${latestTradeDate}。` : "未能识别最近交易日。",

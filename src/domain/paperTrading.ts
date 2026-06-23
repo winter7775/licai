@@ -306,6 +306,8 @@ function isTrialCandidate(candidate: PaperCandidate): boolean {
   if (isQualifiedCandidate(candidate)) return false;
   if (!candidate.hardRulesPassed || candidate.price <= 0 || !candidate.rules?.length) return false;
   if (!rulePassed(candidate, "trend.template")) return false;
+  if (!rulePassed(candidate, "quality.valuation")) return false;
+  if (!rulePassed(candidate, "relative_strength")) return false;
   if (!rulePassed(candidate, "risk.stop_loss_width")) return false;
 
   const platformReady = rulePassed(candidate, "base.range") && platformQualityPassCount(candidate) >= 2;

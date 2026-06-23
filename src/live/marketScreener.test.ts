@@ -53,6 +53,16 @@ function makeBars(): DailyBar[] {
   return bars;
 }
 
+function makeBenchmarkBars(stockBars: DailyBar[], multiplier = 1): DailyBar[] {
+  return stockBars.map((bar, index) => ({
+    ...bar,
+    close: 10 + index * 0.02 * multiplier,
+    open: 10 + index * 0.02 * multiplier,
+    high: 10 + index * 0.02 * multiplier + 0.1,
+    low: 10 + index * 0.02 * multiplier - 0.1
+  }));
+}
+
 const liquidSpot: SpotStock = {
   symbol: "600879",
   name: "航天电子",
@@ -265,6 +275,22 @@ describe("live market screener", () => {
     expect(analysis.rules.find((rule) => rule.id === "base.volume_contraction")?.severity).toBe("soft");
     expect(analysis.stopLossWidthPct).toBeLessThanOrEqual(7);
     expect(analysis.pivotPrice).toBeGreaterThan(0);
+  });
+
+  it("requires a buy candidate to hold positive relative strength versus the benchmark", () => {
+    const bars = makeBars();
+    const benchmarkBars = makeBenchmarkBars(bars, 8);
+    const analysis = analyzeHistory(liquidSpot, bars, { benchmarkBars });
+
+    expect(analysis.rules.find((rule) => rule.id === "relative_strength")?.passed).toBe(false);
+    expect(analysis.signalType).toBe("watch");
+  });
+
+  it("treats invalid valuation quality as a hard blocker", () => {
+    const analysis = analyzeHistory({ ...liquidSpot, peTtm: -8 }, makeBars());
+
+    expect(analysis.rules.find((rule) => rule.id === "quality.valuation")?.passed).toBe(false);
+    expect(analysis.signalType).toBe("watch");
   });
 
   it("does not count an unconfirmed breakout as a failed hard rule for a watch candidate", () => {

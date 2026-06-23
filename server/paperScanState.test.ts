@@ -71,6 +71,22 @@ function batch(overrides: Partial<LiveScanResponse> = {}): LiveScanResponse {
               severity: "hard"
             },
             {
+              id: "quality.valuation",
+              name: "valuation",
+              actual: "pass",
+              threshold: "pass",
+              passed: true,
+              severity: "hard"
+            },
+            {
+              id: "relative_strength",
+              name: "relative strength",
+              actual: "pass",
+              threshold: "pass",
+              passed: true,
+              severity: "hard"
+            },
+            {
               id: "base.range",
               name: "base width",
               actual: "13%",

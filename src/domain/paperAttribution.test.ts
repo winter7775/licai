@@ -77,6 +77,8 @@ describe("paper trading attribution", () => {
           rules: [
             rule({ id: "liquidity.prefilter", name: "liquidity", passed: true, severity: "hard" }),
             rule({ id: "trend.template", name: "trend", passed: true, severity: "hard" }),
+            rule({ id: "quality.valuation", name: "valuation", passed: true, severity: "hard" }),
+            rule({ id: "relative_strength", name: "relative strength", passed: true, severity: "hard" }),
             rule({ id: "base.range", name: "base width", passed: true, severity: "soft" }),
             rule({ id: "base.volume_contraction", name: "volume", passed: true, severity: "soft" }),
             rule({ id: "base.atr_contraction", name: "atr", passed: true, severity: "soft" }),
@@ -102,6 +104,8 @@ describe("paper trading attribution", () => {
           symbol: "600006",
           rules: [
             rule({ id: "trend.template", name: "trend", passed: true }),
+            rule({ id: "quality.valuation", name: "valuation", passed: true, severity: "hard" }),
+            rule({ id: "relative_strength", name: "relative strength", passed: true, severity: "hard" }),
             rule({ id: "base.range", name: "base width", passed: true, severity: "soft" }),
             rule({ id: "base.volume_contraction", name: "volume", passed: true, severity: "soft" }),
             rule({ id: "base.atr_contraction", name: "atr", passed: true, severity: "soft" }),
@@ -126,6 +130,8 @@ describe("paper trading attribution", () => {
           rules: [
             rule({ id: "liquidity.prefilter", name: "liquidity", passed: true, severity: "hard" }),
             rule({ id: "trend.template", name: "trend", passed: true, severity: "hard" }),
+            rule({ id: "quality.valuation", name: "valuation", passed: true, severity: "hard" }),
+            rule({ id: "relative_strength", name: "relative strength", passed: true, severity: "hard" }),
             rule({ id: "base.range", name: "base width", passed: true, severity: "soft" }),
             rule({ id: "base.volume_contraction", name: "volume", passed: true, severity: "soft" }),
             rule({ id: "base.atr_contraction", name: "atr", passed: true, severity: "soft" }),
