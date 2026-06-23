@@ -8,7 +8,7 @@ import {
 import type { LiveScanResponse, LiveScreenedStock } from "./eastmoneyProvider";
 
 export type PaperScanStatus = "idle" | "running" | "complete" | "error";
-const PAPER_SCAN_STRATEGY_VERSION = "v2";
+const PAPER_SCAN_STRATEGY_VERSION = "v3";
 
 export interface PaperScanState {
   date: string;
@@ -54,7 +54,7 @@ function uniqueWarnings(values: string[]): string[] {
 export function createPaperScanState(input: CreatePaperScanStateInput): PaperScanState {
   const now = input.now ?? new Date().toISOString();
   const batchSize = boundedInteger(input.batchSize, 40, 1, 100);
-  const initialPoolTarget = boundedInteger(input.initialPoolTarget ?? 400, 400, 300, 400);
+  const initialPoolTarget = boundedInteger(input.initialPoolTarget ?? 800, 800, 300, 800);
   const dailyLimit = boundedInteger(input.dailyLimit, initialPoolTarget, batchSize, initialPoolTarget);
   const marketCapTopPct = boundedInteger(input.marketCapTopPct ?? 30, 30, 1, 100);
   return {
@@ -105,7 +105,7 @@ function mergeCandidates(
   for (const candidate of incoming) {
     bySymbol.set(candidate.symbol, candidate);
   }
-  return Array.from(bySymbol.values()).sort((left, right) => right.score - left.score).slice(0, 300);
+  return Array.from(bySymbol.values()).sort((left, right) => right.score - left.score).slice(0, 800);
 }
 
 export function mergePaperScanBatch(state: PaperScanState, scan: LiveScanResponse, requestedBatchSize = state.batchSize): PaperScanState {

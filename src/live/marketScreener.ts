@@ -209,8 +209,22 @@ export function parseTencentQfqRows(rows: unknown[][]): DailyBar[] {
   });
 }
 
-export function prefilterSpotStocks(stocks: SpotStock[], limit = 40): SpotStock[] {
-  return stocks
+interface PrefilterOptions {
+  coreLimit?: number;
+  rotationSeed?: string;
+}
+
+function stableHash(text: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+export function prefilterSpotStocks(stocks: SpotStock[], limit = 40, options: PrefilterOptions = {}): SpotStock[] {
+  const ranked = stocks
     .filter((stock) => !/(?:ST|退|N|C)/i.test(stock.name))
     .filter((stock) => stock.price >= 5)
     .filter((stock) => stock.amount >= 100_000_000)
@@ -226,8 +240,19 @@ export function prefilterSpotStocks(stocks: SpotStock[], limit = 40): SpotStock[
       const leftScore = score(left);
       const rightScore = score(right);
       return rightScore - leftScore;
-    })
-    .slice(0, limit);
+    });
+  const boundedLimit = Math.max(1, Math.floor(limit));
+  const coreLimit = Math.min(Math.max(1, Math.floor(options.coreLimit ?? boundedLimit)), boundedLimit);
+  if (boundedLimit <= coreLimit || ranked.length <= coreLimit) return ranked.slice(0, boundedLimit);
+
+  const core = ranked.slice(0, coreLimit);
+  const seed = options.rotationSeed?.trim() || new Date().toISOString().slice(0, 10);
+  const supplemental = ranked
+    .slice(coreLimit)
+    .sort((left, right) => stableHash(`${seed}:${left.symbol}`) - stableHash(`${seed}:${right.symbol}`))
+    .slice(0, boundedLimit - core.length);
+
+  return [...core, ...supplemental];
 }
 
 export function evaluatePlatformSetup(input: {

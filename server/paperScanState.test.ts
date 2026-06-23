@@ -133,8 +133,8 @@ describe("paper background scan state", () => {
     expect(next.analyzedCount).toBe(2);
     expect(next.marketCapUniverseCount).toBe(1600);
     expect(next.scanPolicy.marketCapTopPct).toBe(30);
-    expect(next.scanPolicy.initialPoolTarget).toBe(400);
-    expect(next.scanPolicy.strategyVersion).toBe("v2");
+    expect(next.scanPolicy.initialPoolTarget).toBe(800);
+    expect(next.scanPolicy.strategyVersion).toBe("v3");
     expect(next.candidates).toHaveLength(1);
     expect(next.attribution.ruleFailures[0]).toMatchObject({ id: "buy.breakout", failedCount: 1 });
     expect(next.attribution.relaxedEligibleCount).toBe(1);

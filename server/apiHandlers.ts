@@ -34,9 +34,9 @@ const SPOT_CACHE_TTL_MS = 60 * 1000;
 const PAPER_TRADING_HISTORY_LIMIT = 20;
 const PAPER_TRADING_DISPLAY_LIMIT = 20;
 const PAPER_SCAN_BATCH_SIZE = 40;
-const PAPER_SCAN_DAILY_LIMIT = 400;
+const PAPER_SCAN_DAILY_LIMIT = 800;
 const PAPER_MARKET_CAP_TOP_PCT = 30;
-const PAPER_INITIAL_POOL_TARGET = 400;
+const PAPER_INITIAL_POOL_TARGET = 800;
 
 let spotCache: Awaited<ReturnType<typeof fetchAshareSpot>> | null = null;
 let spotCacheExpiresAt = 0;
@@ -340,12 +340,25 @@ export function hasPaperReviewForDate(account: PaperAccount, date: string): bool
   return account.reviews.some((review) => review.date === date);
 }
 
+export function shouldSkipPaperTradingReview(account: PaperAccount, date: string, scanUpdatedAt?: string, oncePerDay = false): boolean {
+  if (!oncePerDay) return false;
+  const existingReview = account.reviews.find((review) => review.date === date);
+  if (!existingReview) return false;
+  if (!scanUpdatedAt) return true;
+
+  const reviewTime = new Date(existingReview.createdAt).getTime();
+  const scanTime = new Date(scanUpdatedAt).getTime();
+  if (!Number.isFinite(reviewTime) || !Number.isFinite(scanTime)) return true;
+  return reviewTime >= scanTime;
+}
+
 export async function runPaperTradingCycle(options?: { force?: boolean; oncePerDay?: boolean }) {
   const account = await readPaperTradingDb(PAPER_TRADING_DB_PATH);
   const beforeResponse = await buildPaperTradingResponse(account, { forceQuote: options?.force });
   const tradeDate = shanghaiDateString();
   const existingReview = account.reviews.find((review) => review.date === tradeDate);
-  if (options?.oncePerDay && existingReview) {
+  const scanState = await readCurrentPaperScanState();
+  if (existingReview && shouldSkipPaperTradingReview(account, tradeDate, scanState.updatedAt, options?.oncePerDay)) {
     return {
       ...beforeResponse,
       run: {
@@ -367,7 +380,6 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
     },
     { refresh: options?.force }
   );
-  const scanState = await readCurrentPaperScanState();
   const scan = scanState.candidates.length > 0 ? null : await runPaperTradingScreen(options?.force);
   const candidates =
     scanState.candidates.length > 0
@@ -387,6 +399,7 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
     run: {
       trades: plan.trades,
       review: plan.review,
+      candidateDecisions: plan.candidateDecisions,
       beforeSummary: beforeResponse.summary,
       scan: {
         provider: scan?.provider ?? "eastmoney-public",

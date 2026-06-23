@@ -33,6 +33,11 @@ const PYTHON_BRIDGE = path.resolve(SERVER_DIR, "eastmoney_bridge.py");
 const SCAN_CACHE_FILE = path.resolve(SERVER_DIR, "../data/live-scan-cache.json");
 const DEFAULT_MARKET_CAP_TOP_PCT = 0.3;
 const DEFAULT_INITIAL_POOL_LIMIT = 400;
+const DEFAULT_CORE_POOL_LIMIT = 400;
+
+function shanghaiDateString(now = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(now);
+}
 
 export interface LiveScreenedStock {
   spot: SpotStock;
@@ -620,7 +625,10 @@ export async function runLiveScreen(options?: {
   const marketCapTopPct = options?.marketCapTopPct ?? DEFAULT_MARKET_CAP_TOP_PCT;
   const marketCapUniverse = selectMarketCapUniverse(spot.stocks, marketCapTopPct);
   const initialPoolTarget = options?.prefilterLimit ?? DEFAULT_INITIAL_POOL_LIMIT;
-  const prefiltered = prefilterSpotStocks(marketCapUniverse, initialPoolTarget);
+  const prefiltered = prefilterSpotStocks(marketCapUniverse, initialPoolTarget, {
+    coreLimit: DEFAULT_CORE_POOL_LIMIT,
+    rotationSeed: shanghaiDateString()
+  });
   const historyCandidates = selectHistoryCandidates(prefiltered, options?.historyLimit, options?.historyOffset);
   const historyBatch = await fetchHistories(historyCandidates, historyProviderForSpotMode(spotResult.mode));
   const analyzed: LiveScreenedStock[] = [];

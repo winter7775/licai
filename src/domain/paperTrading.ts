@@ -94,10 +94,19 @@ export interface PaperTradingPlanInput {
   tradedAt: string;
 }
 
+export interface PaperCandidateDecision {
+  symbol: string;
+  name: string;
+  grade: "A" | "B";
+  action: "buy" | "skip";
+  reason: string;
+}
+
 export interface PaperTradingPlanResult {
   account: PaperAccount;
   trades: PaperTrade[];
   review: PaperDailyReview;
+  candidateDecisions: PaperCandidateDecision[];
 }
 
 const INITIAL_CAPITAL = 200_000;
@@ -339,6 +348,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
   let nextAccount = input.account;
   const trades: PaperTrade[] = [];
   const decisions: string[] = [];
+  const candidateDecisions: PaperCandidateDecision[] = [];
   const quotes = Object.fromEntries(input.candidates.map((candidate) => [normalizedSymbol(candidate.symbol), candidate.price]));
   const exitedSymbols = new Set<string>();
 
@@ -367,22 +377,46 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
   const targetBand = paperTargetBand(input.position);
   const entryBlockReason = paperEntryBlockReason(input.position, summary);
   const blockedNewEntries = entryBlockReason !== null;
+  const existingSymbols = new Set(nextAccount.holdings.map((holding) => holding.symbol));
+  const sortedCandidates = input.candidates
+    .map((candidate) => ({ candidate, grade: candidateGrade(candidate) }))
+    .filter((item): item is { candidate: PaperCandidate; grade: "A" | "B" } => item.grade !== null)
+    .sort((left, right) => gradeRank(left.grade) - gradeRank(right.grade) || right.candidate.score - left.candidate.score);
+
   if (blockedNewEntries) {
     decisions.push(entryBlockReason);
+    for (const { candidate: item, grade } of sortedCandidates) {
+      const symbol = normalizedSymbol(item.symbol);
+      candidateDecisions.push({
+        symbol,
+        name: item.name,
+        grade,
+        action: "skip",
+        reason: existingSymbols.has(symbol) ? "已持仓" : (entryBlockReason ?? "市场仓位限制")
+      });
+    }
   } else {
     let remainingExposureAmount = Math.max(0, (summary.totalAssets * targetBand.max) / 100 - summary.marketValue);
     let remainingTrialAmount = Math.max(0, (summary.totalAssets * MAX_TRIAL_TOTAL_POSITION_PCT) / 100 - trialExposureAmount(summary));
-    const existingSymbols = new Set(nextAccount.holdings.map((holding) => holding.symbol));
-    const sortedCandidates = input.candidates
-      .map((candidate) => ({ candidate, grade: candidateGrade(candidate) }))
-      .filter((item): item is { candidate: PaperCandidate; grade: "A" | "B" } => item.grade !== null)
-      .filter((item) => !existingSymbols.has(normalizedSymbol(item.candidate.symbol)))
-      .filter((item) => !exitedSymbols.has(normalizedSymbol(item.candidate.symbol)))
-      .sort((left, right) => gradeRank(left.grade) - gradeRank(right.grade) || right.candidate.score - left.candidate.score);
 
     for (const { candidate: item, grade } of sortedCandidates) {
-      if (remainingExposureAmount < MIN_BUY_AMOUNT) break;
-      if (grade === "B" && remainingTrialAmount < MIN_BUY_AMOUNT) continue;
+      const symbol = normalizedSymbol(item.symbol);
+      if (existingSymbols.has(symbol)) {
+        candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "已持仓" });
+        continue;
+      }
+      if (exitedSymbols.has(symbol)) {
+        candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "今日已卖出，避免回补" });
+        continue;
+      }
+      if (remainingExposureAmount < MIN_BUY_AMOUNT) {
+        candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "市场仓位上限不足" });
+        break;
+      }
+      if (grade === "B" && remainingTrialAmount < MIN_BUY_AMOUNT) {
+        candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "B级试错仓位不足" });
+        continue;
+      }
 
       const targetPct =
         grade === "B"
@@ -417,6 +451,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
       });
       const newTrades = nextAccount.trades.slice(beforeCount);
       trades.push(...newTrades);
+      candidateDecisions.push({ symbol, name: item.name, grade, action: "buy", reason });
       remainingExposureAmount = Math.max(0, remainingExposureAmount - newTrades.reduce((sum, trade) => sum + trade.amount, 0));
       if (grade === "B") {
         remainingTrialAmount = Math.max(0, remainingTrialAmount - newTrades.reduce((sum, trade) => sum + trade.amount, 0));
@@ -437,6 +472,28 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
     }
   }
 
+  const decidedSymbols = new Set(candidateDecisions.map((item) => item.symbol));
+  for (const { candidate: item, grade } of sortedCandidates) {
+    const symbol = normalizedSymbol(item.symbol);
+    if (decidedSymbols.has(symbol)) continue;
+    const targetPct =
+      grade === "B"
+        ? Math.min(MAX_TRIAL_SINGLE_POSITION_PCT, targetBand.max)
+        : Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
+    const targetAmount = Math.min((summary.totalAssets * targetPct) / 100, nextAccount.cash);
+    const reason =
+      existingSymbols.has(symbol)
+        ? "已持仓"
+        : exitedSymbols.has(symbol)
+          ? "今日已卖出，避免回补"
+          : targetAmount < MIN_BUY_AMOUNT
+            ? "计划金额低于5000"
+            : Math.floor(targetAmount / item.price / 100) * 100 <= 0
+              ? "不足一手"
+              : "本轮额度已被更高优先级候选占用";
+    candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason });
+  }
+
   const review: PaperDailyReview = {
     id: reviewId(input.tradedAt),
     date: input.tradedAt.slice(0, 10),
@@ -454,6 +511,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
       reviews: [review, ...nextAccount.reviews.filter((item) => item.id !== review.id)]
     },
     trades,
-    review
+    review,
+    candidateDecisions
   };
 }

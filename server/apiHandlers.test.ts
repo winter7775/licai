@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fillMissingPaperQuotePrices, handleApiRequest, hasPaperReviewForDate } from "./apiHandlers";
+import { fillMissingPaperQuotePrices, handleApiRequest, hasPaperReviewForDate, shouldSkipPaperTradingReview } from "./apiHandlers";
 
 function createMockResponse() {
   return {
@@ -83,5 +83,29 @@ describe("shared api handlers", () => {
     expect(result.quotes).toEqual({ "002179": 44.12, "600961": 29 });
     expect(result.filledSymbols).toEqual(["002179"]);
     expect(result.missingSymbols).toEqual([]);
+  });
+
+  it("allows a same-day paper review to run again when the completed scan was refreshed later", () => {
+    const account = {
+      initialCapital: 200000,
+      cash: 200000,
+      holdings: [],
+      trades: [],
+      updatedAt: "2026-06-23T07:00:00.000Z",
+      reviews: [
+        {
+          id: "review-2026-06-23",
+          date: "2026-06-23",
+          actionSummary: "reviewed",
+          marketGate: "defensive",
+          targetExposurePct: 35,
+          decisions: [],
+          createdAt: "2026-06-23T06:30:00.000Z"
+        }
+      ]
+    };
+
+    expect(shouldSkipPaperTradingReview(account, "2026-06-23", "2026-06-23T07:05:00.000Z", true)).toBe(false);
+    expect(shouldSkipPaperTradingReview(account, "2026-06-23", "2026-06-23T06:00:00.000Z", true)).toBe(true);
   });
 });

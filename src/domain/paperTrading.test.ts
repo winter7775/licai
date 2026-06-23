@@ -249,6 +249,27 @@ describe("paper trading auto plan", () => {
     expect(summarizePaperAccount(result.account, { "603259": 20 }).exposurePct).toBe(3);
   });
 
+  it("explains why a B-grade trial candidate was not bought", () => {
+    const nearBreakoutRules = trialCandidate().rules?.map((item) =>
+      item.id === "buy.breakout" ? { ...item, actual: "偏离-1.2% / 量比0.97" } : item
+    );
+
+    const result = generatePaperTradingPlan({
+      account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      candidates: [trialCandidate({ symbol: "600777", price: 90, rules: nearBreakoutRules })],
+      position: defensiveBandPosition,
+      tradedAt: "2026-06-09T15:10:00.000Z"
+    });
+
+    expect(result.trades).toEqual([]);
+    expect(result.candidateDecisions[0]).toMatchObject({
+      symbol: "600777",
+      grade: "B",
+      action: "skip",
+      reason: "不足一手"
+    });
+  });
+
   it("does not use B-grade trial entries when the setup is far below pivot and weak volume", () => {
     const weakRules = trialCandidate().rules?.map((item) =>
       item.id === "buy.breakout" ? { ...item, actual: "偏离-14.27% / 量比0.63" } : item

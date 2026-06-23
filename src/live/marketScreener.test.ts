@@ -189,6 +189,22 @@ describe("live market screener", () => {
     expect(result).toHaveLength(400);
   });
 
+  it("keeps a core 400-name pool and adds rotated supplemental names when the scan target is larger", () => {
+    const stocks = Array.from({ length: 900 }, (_, index) => ({
+      ...liquidSpot,
+      symbol: String(index).padStart(6, "0"),
+      amount: 900_000_000 - index * 100_000,
+      totalMarketCap: 1_000_000_000_000 - index * 1_000_000_000,
+      floatMarketCap: 800_000_000_000 - index * 800_000_000
+    }));
+
+    const result = prefilterSpotStocks(stocks, 800, { coreLimit: 400, rotationSeed: "2026-06-23" });
+
+    expect(result).toHaveLength(800);
+    expect(result.slice(0, 400).map((stock) => stock.symbol)).toEqual(stocks.slice(0, 400).map((stock) => stock.symbol));
+    expect(result.some((stock) => Number(stock.symbol) >= 800)).toBe(true);
+  });
+
   it("keeps large liquid stocks in the 400-name pool even when PE or daily change is not textbook-perfect", () => {
     const stocks = [
       { ...liquidSpot, symbol: "000001", peTtm: -8, changePct: -5, amount: 500_000_000 },

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readPaperBackgroundScan, resetPaperBackgroundScan, runPaperBackgroundScanStep, runPaperTradingCycle } from "./apiHandlers";
 
 const DEFAULT_BATCH_SIZE = 40;
-const DEFAULT_MAX_BATCHES = 10;
+const DEFAULT_MAX_BATCHES = 20;
 const LOG_DIR = path.resolve(process.cwd(), "output/logs");
 
 type ScanStatus = "idle" | "running" | "complete" | "error";

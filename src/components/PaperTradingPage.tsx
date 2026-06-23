@@ -38,8 +38,8 @@ function scanPolicy(scanState: PaperScanStateDto | undefined) {
   return (
     scanState?.scanPolicy ?? {
       marketCapTopPct: 30,
-      initialPoolTarget: 400,
-      dailyLimit: scanState?.dailyLimit ?? 400,
+      initialPoolTarget: 800,
+      dailyLimit: scanState?.dailyLimit ?? 800,
       batchSize: scanState?.batchSize ?? 40
     }
   );
@@ -52,6 +52,12 @@ function diagnosisText(scanState: PaperScanStateDto | undefined): string {
   if (attribution.nearMissCount > 0) return `暂无严格可买，但有 ${attribution.nearMissCount} 只股票只差 1-2 个非底线硬规则，适合复盘规则是否过紧。`;
   if (scanState.analyzedCount > 0) return "当前已扫描样本中没有严格可买，也没有接近可买标的，系统不会强行建仓。";
   return "后台扫描尚未开始，先跑一批建立样本。";
+}
+
+function candidateDecisionText(paperTrading: PaperTradingResponseDto | null, symbol: string): string | null {
+  const decision = paperTrading?.run?.candidateDecisions?.find((item) => item.symbol === symbol);
+  if (!decision) return null;
+  return `${decision.grade}级${decision.action === "buy" ? "买入" : "跳过"}：${decision.reason}`;
 }
 
 export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRunScanBatch }: PaperTradingPageProps) {
@@ -107,7 +113,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
         <div className="panel-heading paper-attribution-heading">
           <div>
             <h2>扫描与未买入归因</h2>
-            <p>策略 v2：核心风控用于下单，平台收敛改为组合评分，并用完整样本检验阈值。</p>
+            <p>策略 v3：核心 400 + 轮动补充池，核心风控用于下单，并展示候选未买原因。</p>
           </div>
           <div className="paper-actions">
             <span className={`status-pill ${scanState?.status === "complete" ? "good" : scanState?.status === "error" ? "bad" : "neutral"}`}>
@@ -121,7 +127,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
               type="button"
             >
               <Search size={16} />
-              <span>{scanState?.status === "complete" ? "扫描完成" : "自动扫描 400 只"}</span>
+              <span>{scanState?.status === "complete" ? "扫描完成" : `自动扫描 ${count(policy.dailyLimit)} 只`}</span>
             </button>
           </div>
         </div>
@@ -223,7 +229,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                   <span className={item.relaxedEligible ? "gain" : "muted-text"}>
                     {item.relaxedEligible ? "接近可买" : item.signalType === "watch" ? "观察" : "未通过"}
                   </span>
-                  <small>{item.failedHardRules.join(" / ") || "观察信号未确认"}</small>
+                  <small>{candidateDecisionText(paperTrading, item.symbol) ?? (item.failedHardRules.join(" / ") || "观察信号未确认")}</small>
                 </div>
               ))}
               {(attribution?.rejections.length ?? 0) === 0 ? <p className="empty-note">暂无候选明细</p> : null}

@@ -1,6 +1,6 @@
 import type { DailyBar, HistoryAnalysis, SpotStock } from "./marketScreener";
 import type { PaperAttributionCandidate, PaperAttributionReport } from "../domain/paperAttribution";
-import type { PaperAccount, PaperAccountSummary, PaperDailyReview, PaperTrade } from "../domain/paperTrading";
+import type { PaperAccount, PaperAccountSummary, PaperCandidateDecision, PaperDailyReview, PaperTrade } from "../domain/paperTrading";
 import type { PortfolioState, PortfolioSummary } from "../domain/portfolio";
 import type { PositionGateResult } from "../domain/types";
 import type { PositionStatus } from "../domain/types";
@@ -95,6 +95,7 @@ export interface PaperTradingResponseDto {
   run?: {
     trades: PaperTrade[];
     review: PaperDailyReview;
+    candidateDecisions?: PaperCandidateDecision[];
     scan: {
       provider: LiveScanResponseDto["provider"];
       tradeDate: string;
