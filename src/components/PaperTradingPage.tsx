@@ -1,4 +1,8 @@
-import { Bot, CheckCircle2, DatabaseZap, Play, RefreshCw, Search } from "lucide-react";
+import { Bot, CheckCircle2, ChevronDown, DatabaseZap, Play, RefreshCw, Search } from "lucide-react";
+import { Fragment, useState } from "react";
+import type { PaperAttributionCandidate, PaperCandidateRejection } from "../domain/paperAttribution";
+import type { PaperCandidateDecision, PaperHoldingSummary, PaperTrade } from "../domain/paperTrading";
+import type { DailyBar } from "../live/marketScreener";
 import type { PaperTradingResponseDto, PaperScanStateDto } from "../live/liveTypes";
 
 interface PaperTradingPageProps {
@@ -60,7 +64,195 @@ function candidateDecisionText(paperTrading: PaperTradingResponseDto | null, sym
   return `${decision.grade}级${decision.action === "buy" ? "买入" : "跳过"}：${decision.reason}`;
 }
 
+function isStrictCandidate(candidate: PaperAttributionCandidate): boolean {
+  return (
+    candidate.price > 0 &&
+    candidate.signalType !== "watch" &&
+    !candidate.rules.some((rule) => (rule.severity ?? "soft") === "hard" && !rule.passed)
+  );
+}
+
+function ruleActual(candidate: PaperAttributionCandidate, id: string): string {
+  const rule = candidate.rules.find((item) => item.id === id);
+  return rule ? `${rule.name} ${rule.actual}` : "--";
+}
+
+function candidateFromRejection(rejection: PaperCandidateRejection): PaperAttributionCandidate {
+  return {
+    symbol: rejection.symbol,
+    name: rejection.name,
+    price: rejection.price,
+    signalType: rejection.signalType,
+    score: rejection.score,
+    rules: []
+  };
+}
+
+function decisionMap(paperTrading: PaperTradingResponseDto | null): Map<string, PaperCandidateDecision> {
+  return new Map((paperTrading?.run?.candidateDecisions ?? []).map((item) => [item.symbol, item]));
+}
+
+function tradeTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function holdingDays(openedAt: string): number {
+  const opened = new Date(openedAt).getTime();
+  if (!Number.isFinite(opened)) return 0;
+  return Math.max(0, Math.ceil((Date.now() - opened) / 86_400_000));
+}
+
+function MiniKline({ symbol, bars }: { symbol: string; bars: DailyBar[] | undefined }) {
+  const recent = (bars ?? []).slice(-42);
+  if (recent.length === 0) {
+    return (
+      <div className="mini-kline-empty" data-testid={`mini-kline-${symbol}`}>
+        日K载入中
+      </div>
+    );
+  }
+
+  const high = Math.max(...recent.map((bar) => bar.high));
+  const low = Math.min(...recent.map((bar) => bar.low));
+  const maxVolume = Math.max(...recent.map((bar) => bar.volume), 1);
+  const priceRange = Math.max(high - low, 0.01);
+  const candleWidth = Math.max(3, 300 / recent.length - 2);
+  const xStep = 320 / Math.max(recent.length - 1, 1);
+  const priceY = (price: number) => 88 - ((price - low) / priceRange) * 76;
+  const volumeY = (volume: number) => 118 - (volume / maxVolume) * 24;
+  const points = recent.map((bar, index) => `${index * xStep},${priceY(bar.close)}`).join(" ");
+
+  return (
+    <svg className="mini-kline" data-testid={`mini-kline-${symbol}`} viewBox="0 0 330 126" role="img" aria-label={`${symbol} 日K和成交量`}>
+      <polyline className="mini-kline-line" points={points} />
+      {recent.map((bar, index) => {
+        const x = index * xStep;
+        const up = bar.close >= bar.open;
+        const bodyTop = priceY(Math.max(bar.open, bar.close));
+        const bodyBottom = priceY(Math.min(bar.open, bar.close));
+        return (
+          <g key={`${bar.date}-${index}`}>
+            <line className={up ? "k-up" : "k-down"} x1={x} x2={x} y1={priceY(bar.high)} y2={priceY(bar.low)} />
+            <rect
+              className={up ? "k-up" : "k-down"}
+              x={x - candleWidth / 2}
+              y={bodyTop}
+              width={candleWidth}
+              height={Math.max(2, bodyBottom - bodyTop)}
+              rx="0.8"
+            />
+            <rect className="volume-bar" x={x - candleWidth / 2} y={volumeY(bar.volume)} width={candleWidth} height={118 - volumeY(bar.volume)} />
+          </g>
+        );
+      })}
+      <text x="0" y="12">{recent[0]?.date}</text>
+      <text x="248" y="12">{recent[recent.length - 1]?.date}</text>
+    </svg>
+  );
+}
+
+function CandidateCard({
+  candidate,
+  decision,
+  expanded,
+  bars,
+  onToggle,
+  testId
+}: {
+  candidate: PaperAttributionCandidate;
+  decision: PaperCandidateDecision | undefined;
+  expanded: boolean;
+  bars: DailyBar[] | undefined;
+  onToggle: () => void;
+  testId: string;
+}) {
+  return (
+    <article className="candidate-card" data-testid={testId}>
+      <button className="candidate-card-main" type="button" onClick={onToggle}>
+        <div>
+          <strong>
+            {candidate.symbol} {candidate.name}
+          </strong>
+          <span>{candidate.industry ?? "未分类"} · {candidate.signalType}</span>
+        </div>
+        <div className="candidate-metrics">
+          <span>价格 {money(candidate.price)}</span>
+          <span>评分 {candidate.score}</span>
+          <span>{decision ? `${decision.grade}级${decision.action === "buy" ? "买入" : "跳过"}` : "待执行"}</span>
+        </div>
+        <ChevronDown className={expanded ? "expanded" : ""} size={16} />
+      </button>
+      <p className="candidate-decision">{decision?.reason ?? "等待模拟盘执行层确认资金与仓位"}</p>
+      {expanded ? (
+        <div className="candidate-detail">
+          <MiniKline symbol={candidate.symbol} bars={bars} />
+          <div className="candidate-rule-grid">
+            <span>{ruleActual(candidate, "buy.breakout")}</span>
+            <span>{ruleActual(candidate, "base.volume_contraction")}</span>
+            <span>{ruleActual(candidate, "relative_strength")}</span>
+            <span>{ruleActual(candidate, "quality.valuation")}</span>
+            <span>止损 {money(candidate.stopPrice)} / 止盈 {money(candidate.takeProfitPrice)}</span>
+          </div>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function HoldingDetail({ holding, bars, trades }: { holding: PaperHoldingSummary; bars: DailyBar[] | undefined; trades: PaperTrade[] }) {
+  const realizedPnl = trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + (trade.realizedPnl ?? 0), 0);
+
+  return (
+    <tr className="holding-detail-row" data-testid={`paper-holding-detail-${holding.symbol}`}>
+      <td colSpan={9}>
+        <div className="holding-detail-grid">
+          <MiniKline symbol={holding.symbol} bars={bars} />
+          <div className="holding-detail-metrics">
+            <div>
+              <span>持仓天数</span>
+              <strong>{holdingDays(holding.openedAt)} 天</strong>
+            </div>
+            <div>
+              <span>浮动盈亏</span>
+              <strong className={holding.unrealizedPnl >= 0 ? "gain" : "loss"}>
+                {money(holding.unrealizedPnl)} / {pct(holding.unrealizedPnlPct)}
+              </strong>
+            </div>
+            <div>
+              <span>已实现盈亏</span>
+              <strong className={realizedPnl >= 0 ? "gain" : "loss"}>{money(realizedPnl)}</strong>
+            </div>
+            <div>
+              <span>买入理由</span>
+              <strong>{holding.reason}</strong>
+            </div>
+          </div>
+          <div className="holding-trade-ledger" data-testid={`paper-holding-trades-${holding.symbol}`}>
+            <h4>交易流水</h4>
+            {trades.map((trade) => (
+              <div className="holding-trade-row" key={trade.id}>
+                <span className={`status-pill ${trade.side === "buy" ? "good" : "warn"}`}>{trade.side === "buy" ? "买入" : "卖出"}</span>
+                <strong>{trade.quantity} 股 @ {money(trade.price)}</strong>
+                <small>
+                  {tradeTime(trade.tradedAt)} · 金额 {money(trade.amount)}
+                  {trade.realizedPnl !== undefined ? ` · 已实现 ${money(trade.realizedPnl)} (${pct(trade.realizedPnlPct)})` : ""}
+                  {' · '}{trade.reason}
+                </small>
+              </div>
+            ))}
+            {trades.length === 0 ? <p className="empty-note">暂无该标的交易流水</p> : null}
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRunScanBatch }: PaperTradingPageProps) {
+  const [expandedCandidate, setExpandedCandidate] = useState<string | null>(null);
+  const [expandedHolding, setExpandedHolding] = useState<string | null>(null);
+  const [historyBySymbol, setHistoryBySymbol] = useState<Record<string, DailyBar[]>>({});
   const summary = paperTrading?.summary;
   const latestReview = paperTrading?.account.reviews[0];
   const latestRun = paperTrading?.run;
@@ -70,6 +262,35 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
   const scanDenominator = Math.max(scanState?.prefilteredCount ?? policy.dailyLimit, 1);
   const scanProgressPct = Math.min(100, ((scanState?.cursor ?? 0) / scanDenominator) * 100);
   const rejectedCount = Math.max((scanState?.analyzedCount ?? 0) - (attribution?.strictEligibleCount ?? 0), 0);
+  const candidatesBySymbol = new Map((scanState?.candidates ?? []).map((candidate) => [candidate.symbol, candidate]));
+  const strictCandidates = (scanState?.candidates ?? []).filter(isStrictCandidate).slice(0, 12);
+  const nearCandidates = (attribution?.rejections ?? [])
+    .filter((item) => item.relaxedEligible)
+    .map((item) => candidatesBySymbol.get(item.symbol) ?? candidateFromRejection(item))
+    .slice(0, 12);
+  const decisions = decisionMap(paperTrading);
+
+  async function ensureHistory(symbol: string) {
+    if (historyBySymbol[symbol]) return;
+    try {
+      const response = await fetch(`/api/live/history/${symbol}?limit=160`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as { bars?: DailyBar[] };
+      setHistoryBySymbol((current) => ({ ...current, [symbol]: payload.bars ?? [] }));
+    } catch {
+      setHistoryBySymbol((current) => ({ ...current, [symbol]: [] }));
+    }
+  }
+
+  function toggleCandidate(symbol: string) {
+    setExpandedCandidate((current) => (current === symbol ? null : symbol));
+    void ensureHistory(symbol);
+  }
+
+  function toggleHolding(symbol: string) {
+    setExpandedHolding((current) => (current === symbol ? null : symbol));
+    void ensureHistory(symbol);
+  }
 
   return (
     <div className="page-stack">
@@ -197,6 +418,50 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
           </div>
         </div>
 
+        <div className="candidate-board">
+          <section className="candidate-column">
+            <div className="candidate-column-heading">
+              <h3>严格可买</h3>
+              <span>{strictCandidates.length} 只</span>
+            </div>
+            <div className="candidate-list" data-testid="paper-strict-candidate-list">
+              {strictCandidates.map((candidate) => (
+                <CandidateCard
+                  key={candidate.symbol}
+                  candidate={candidate}
+                  decision={decisions.get(candidate.symbol)}
+                  expanded={expandedCandidate === candidate.symbol}
+                  bars={historyBySymbol[candidate.symbol]}
+                  onToggle={() => toggleCandidate(candidate.symbol)}
+                  testId={`paper-strict-candidate-${candidate.symbol}`}
+                />
+              ))}
+              {strictCandidates.length === 0 ? <p className="empty-note">本轮没有严格可买标的</p> : null}
+            </div>
+          </section>
+
+          <section className="candidate-column">
+            <div className="candidate-column-heading">
+              <h3>接近可买</h3>
+              <span>{nearCandidates.length} 只</span>
+            </div>
+            <div className="candidate-list" data-testid="paper-near-candidate-list">
+              {nearCandidates.map((candidate) => (
+                <CandidateCard
+                  key={candidate.symbol}
+                  candidate={candidate}
+                  decision={decisions.get(candidate.symbol)}
+                  expanded={expandedCandidate === candidate.symbol}
+                  bars={historyBySymbol[candidate.symbol]}
+                  onToggle={() => toggleCandidate(candidate.symbol)}
+                  testId={`paper-near-candidate-${candidate.symbol}`}
+                />
+              ))}
+              {nearCandidates.length === 0 ? <p className="empty-note">本轮没有接近可买标的</p> : null}
+            </div>
+          </section>
+        </div>
+
         <div className="attribution-workbench">
           <div className="attribution-section">
             <div className="section-title">
@@ -264,24 +529,40 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
               </tr>
             </thead>
             <tbody>
-              {(summary?.holdings ?? []).map((holding) => (
-                <tr key={holding.symbol}>
-                  <td className="mono">{holding.symbol}</td>
-                  <td>
-                    <strong>{holding.name}</strong>
-                    <small>{holding.reason}</small>
-                  </td>
-                  <td>{holding.quantity}</td>
-                  <td>{holding.avgCost}</td>
-                  <td>{holding.currentPrice}</td>
-                  <td>{money(holding.marketValue)}</td>
-                  <td className={holding.unrealizedPnl >= 0 ? "gain" : "loss"}>{money(holding.unrealizedPnl)}</td>
-                  <td>{pct(holding.weightPct)}</td>
-                  <td>
-                    {holding.stopPrice} / {holding.takeProfitPrice}
-                  </td>
-                </tr>
-              ))}
+              {(summary?.holdings ?? []).map((holding) => {
+                const symbolTrades = (paperTrading?.account.trades ?? []).filter((trade) => trade.symbol === holding.symbol);
+                return (
+                  <Fragment key={holding.symbol}>
+                    <tr
+                      className="holding-row"
+                      data-testid={`paper-holding-row-${holding.symbol}`}
+                      key={`${holding.symbol}-row`}
+                      onClick={() => toggleHolding(holding.symbol)}
+                    >
+                      <td className="mono">{holding.symbol}</td>
+                      <td>
+                        <strong>{holding.name}</strong>
+                        <small>{holding.reason}</small>
+                      </td>
+                      <td>{holding.quantity}</td>
+                      <td>{holding.avgCost}</td>
+                      <td>{holding.currentPrice}</td>
+                      <td>{money(holding.marketValue)}</td>
+                      <td className={holding.unrealizedPnl >= 0 ? "gain" : "loss"}>
+                        {money(holding.unrealizedPnl)}
+                        <small>{pct(holding.unrealizedPnlPct)}</small>
+                      </td>
+                      <td>{pct(holding.weightPct)}</td>
+                      <td>
+                        {holding.stopPrice} / {holding.takeProfitPrice}
+                      </td>
+                    </tr>
+                    {expandedHolding === holding.symbol ? (
+                      <HoldingDetail holding={holding} bars={historyBySymbol[holding.symbol]} trades={symbolTrades} />
+                    ) : null}
+                  </Fragment>
+                );
+              })}
               {(summary?.holdings.length ?? 0) === 0 ? (
                 <tr>
                   <td colSpan={9}>

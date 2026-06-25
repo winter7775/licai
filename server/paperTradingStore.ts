@@ -33,6 +33,8 @@ function normalizePaperAccount(input: Partial<PaperAccount>): PaperAccount {
           stopPrice: trade.stopPrice === undefined ? undefined : Number(trade.stopPrice),
           takeProfitPrice: trade.takeProfitPrice === undefined ? undefined : Number(trade.takeProfitPrice),
           amount: Number(trade.amount) || 0,
+          realizedPnl: trade.realizedPnl === undefined ? undefined : Number(trade.realizedPnl),
+          realizedPnlPct: trade.realizedPnlPct === undefined ? undefined : Number(trade.realizedPnlPct),
           reason: String(trade.reason ?? ""),
           tradedAt: String(trade.tradedAt ?? fallback.updatedAt)
         }))

@@ -31,6 +31,8 @@ export interface PaperTradeInput {
 export interface PaperTrade extends PaperTradeInput {
   id: string;
   amount: number;
+  realizedPnl?: number;
+  realizedPnlPct?: number;
 }
 
 export interface PaperDailyReview {
@@ -234,6 +236,8 @@ export function applyPaperTrade(account: PaperAccount, input: PaperTradeInput): 
   if (!existing) return account;
   const soldQuantity = Math.min(quantity, existing.quantity);
   const sellAmount = round(soldQuantity * price);
+  const realizedPnl = round((price - existing.avgCost) * soldQuantity);
+  const realizedPnlPct = existing.avgCost > 0 ? round(((price - existing.avgCost) / existing.avgCost) * 100) : 0;
   const remainingQuantity = existing.quantity - soldQuantity;
   const nextHoldings =
     remainingQuantity > 0
@@ -257,7 +261,9 @@ export function applyPaperTrade(account: PaperAccount, input: PaperTradeInput): 
       {
         ...trade,
         quantity: soldQuantity,
-        amount: sellAmount
+        amount: sellAmount,
+        realizedPnl,
+        realizedPnlPct
       }
     ],
     updatedAt: input.tradedAt

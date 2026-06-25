@@ -160,6 +160,7 @@ describe("paper trading account", () => {
     expect(sold.holdings[0].quantity).toBe(600);
     expect(sold.holdings[0].avgCost).toBe(20);
     expect(sold.trades).toHaveLength(2);
+    expect(sold.trades[1]).toMatchObject({ side: "sell", quantity: 400, amount: 8800, realizedPnl: 800, realizedPnlPct: 10 });
   });
 });
 
