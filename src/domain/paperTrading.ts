@@ -136,6 +136,46 @@ function reviewId(createdAt: string): string {
   return `review-${createdAt.slice(0, 10)}`;
 }
 
+function shanghaiDateString(value = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(value);
+}
+
+function tradeDateKey(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
+  return shanghaiDateString(date);
+}
+
+function sameDayBuyBasis(account: PaperAccount, asOfDate: string): Record<string, { quantity: number; amount: number }> {
+  return account.trades.reduce<Record<string, { quantity: number; amount: number }>>((acc, trade) => {
+    if (trade.side !== "buy" || tradeDateKey(trade.tradedAt) !== asOfDate) return acc;
+    const existing = acc[trade.symbol] ?? { quantity: 0, amount: 0 };
+    acc[trade.symbol] = {
+      quantity: existing.quantity + trade.quantity,
+      amount: round(existing.amount + trade.amount)
+    };
+    return acc;
+  }, {});
+}
+
+function dailyPnlBasis(
+  holding: PaperHolding,
+  previousClose: number | undefined,
+  todayBuy: { quantity: number; amount: number } | undefined
+): { value: number; pctBasis: number } | null {
+  const todayQuantity = todayBuy ? Math.min(holding.quantity, todayBuy.quantity) : 0;
+  const overnightQuantity = holding.quantity - todayQuantity;
+  if (overnightQuantity > 0 && previousClose === undefined) return null;
+
+  const todayAvgCost = todayBuy && todayBuy.quantity > 0 ? todayBuy.amount / todayBuy.quantity : undefined;
+  if (todayQuantity > 0 && todayAvgCost === undefined) return null;
+
+  const overnightValue = overnightQuantity * (previousClose ?? 0);
+  const todayValue = todayQuantity * (todayAvgCost ?? 0);
+  const value = overnightValue + todayValue;
+  return value > 0 ? { value, pctBasis: value } : null;
+}
+
 export function createInitialPaperAccount(now = new Date().toISOString()): PaperAccount {
   return {
     initialCapital: INITIAL_CAPITAL,
@@ -150,14 +190,18 @@ export function createInitialPaperAccount(now = new Date().toISOString()): Paper
 export function summarizePaperAccount(
   account: PaperAccount,
   quotes: Record<string, number> = {},
-  previousCloses: Record<string, number> = {}
+  previousCloses: Record<string, number> = {},
+  asOfDate = shanghaiDateString()
 ): PaperAccountSummary {
+  const todayBuys = sameDayBuyBasis(account, asOfDate);
   const holdings = account.holdings.map((holding) => {
     const currentPrice = quotes[holding.symbol] && quotes[holding.symbol] > 0 ? quotes[holding.symbol] : holding.avgCost;
     const previousClose = previousCloses[holding.symbol] && previousCloses[holding.symbol] > 0 ? previousCloses[holding.symbol] : undefined;
     const marketValue = holding.quantity * currentPrice;
     const costValue = holding.quantity * holding.avgCost;
-    const todayPnl = previousClose === undefined ? undefined : (currentPrice - previousClose) * holding.quantity;
+    const basis = dailyPnlBasis(holding, previousClose, todayBuys[holding.symbol]);
+    const todayPnl = basis === null ? undefined : marketValue - basis.value;
+    const todayPnlPct = basis === null ? undefined : ((marketValue - basis.value) / basis.pctBasis) * 100;
     const unrealizedPnl = marketValue - costValue;
 
     return {
@@ -167,7 +211,7 @@ export function summarizePaperAccount(
       marketValue: round(marketValue),
       costValue: round(costValue),
       todayPnl: todayPnl === undefined ? undefined : round(todayPnl),
-      todayPnlPct: previousClose === undefined ? undefined : round(((currentPrice / previousClose) - 1) * 100),
+      todayPnlPct: todayPnlPct === undefined ? undefined : round(todayPnlPct),
       unrealizedPnl: round(unrealizedPnl),
       unrealizedPnlPct: costValue > 0 ? round((unrealizedPnl / costValue) * 100) : 0,
       weightPct: 0

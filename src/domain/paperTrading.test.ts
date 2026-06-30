@@ -133,6 +133,27 @@ describe("paper trading account", () => {
     expect(summary.holdings[0].todayPnlPct).toBe(4.76);
   });
 
+  it("uses same-day buy cost as the daily PnL basis for newly opened holdings", () => {
+    const account = applyPaperTrade(createInitialPaperAccount("2026-06-30T09:30:00.000Z"), {
+      side: "buy",
+      symbol: "300303",
+      name: "test stock",
+      industry: "test",
+      quantity: 1200,
+      price: 11.06,
+      stopPrice: 10.63,
+      takeProfitPrice: 15.48,
+      reason: "breakout",
+      tradedAt: "2026-06-30T07:10:00.000Z"
+    });
+
+    const summary = summarizePaperAccount(account, { "300303": 11.06 }, { "300303": 10.81 }, "2026-06-30");
+
+    expect(summary.holdings[0].unrealizedPnl).toBe(0);
+    expect(summary.holdings[0].todayPnl).toBe(0);
+    expect(summary.holdings[0].todayPnlPct).toBe(0);
+  });
+
   it("updates cash, average cost, and ledger when applying buys and sells", () => {
     const bought = applyPaperTrade(createInitialPaperAccount("2026-06-09T09:30:00.000Z"), {
       side: "buy",
