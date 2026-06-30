@@ -121,7 +121,7 @@ describe("paper trading account", () => {
       tradedAt: "2026-06-09T10:00:00.000Z"
     });
 
-    const summary = summarizePaperAccount(account, { "600879": 22 });
+    const summary = summarizePaperAccount(account, { "600879": 22 }, { "600879": 21 });
 
     expect(summary.cash).toBe(180000);
     expect(summary.marketValue).toBe(22000);
@@ -129,6 +129,8 @@ describe("paper trading account", () => {
     expect(summary.totalReturnPct).toBe(1);
     expect(summary.exposurePct).toBe(10.89);
     expect(summary.holdings[0].unrealizedPnl).toBe(2000);
+    expect(summary.holdings[0].todayPnl).toBe(1000);
+    expect(summary.holdings[0].todayPnlPct).toBe(4.76);
   });
 
   it("updates cash, average cost, and ledger when applying buys and sells", () => {

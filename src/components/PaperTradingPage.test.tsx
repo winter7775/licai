@@ -84,10 +84,13 @@ function paperTradingFixture(): PaperTradingResponseDto {
           quantity: 1000,
           avgCost: 10,
           currentPrice: 11,
+          previousClose: 10.5,
           marketValue: 11000,
           costValue: 10000,
           unrealizedPnl: 1000,
           unrealizedPnlPct: 10,
+          todayPnl: 500,
+          todayPnlPct: 4.76,
           weightPct: 5.64,
           stopPrice: 9.3,
           takeProfitPrice: 14,
@@ -227,6 +230,8 @@ describe("PaperTradingPage", () => {
     expect(screen.getByTestId("paper-near-candidate-list")).toBeTruthy();
     expect(screen.getByTestId("paper-strict-candidate-600001").textContent).toContain("已持仓");
     expect(screen.getByTestId("paper-near-candidate-600002").textContent).toContain("本轮额度");
+    expect(screen.getByTestId("paper-holding-row-600001").textContent).toContain("500");
+    expect(screen.getByTestId("paper-holding-row-600001").textContent).toContain("4.76%");
   });
 
   it("expands a holding to show chart area and symbol trade ledger", async () => {

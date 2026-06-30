@@ -181,6 +181,15 @@ function paperQuotePricesFromSpot(stocks: Awaited<ReturnType<typeof fetchAshareS
   return Object.fromEntries(stocks.filter((stock) => wanted.has(stock.symbol)).map((stock) => [stock.symbol, stock.price]));
 }
 
+function paperPreviousClosesFromSpot(stocks: Awaited<ReturnType<typeof fetchAshareSpot>>["stocks"], symbols: string[]): Record<string, number> {
+  const wanted = new Set(symbols);
+  return Object.fromEntries(
+    stocks
+      .filter((stock) => wanted.has(stock.symbol) && stock.previousClose > 0)
+      .map((stock) => [stock.symbol, stock.previousClose])
+  );
+}
+
 export function shouldFetchPaperQuotes(symbols: string[]): boolean {
   return symbols.length > 0;
 }
@@ -188,29 +197,39 @@ export function shouldFetchPaperQuotes(symbols: string[]): boolean {
 export async function fillMissingPaperQuotePrices(
   symbols: string[],
   quotes: Record<string, number>,
+  previousClosesOrHistoryProvider: Record<string, number> | typeof fetchStockHistory = {},
   historyProvider: typeof fetchStockHistory = fetchStockHistory
-): Promise<{ quotes: Record<string, number>; filledSymbols: string[]; missingSymbols: string[] }> {
+): Promise<{ quotes: Record<string, number>; previousCloses: Record<string, number>; filledSymbols: string[]; missingSymbols: string[] }> {
   const nextQuotes = { ...quotes };
+  const previousCloses = typeof previousClosesOrHistoryProvider === "function" ? {} : previousClosesOrHistoryProvider;
+  const resolvedHistoryProvider = typeof previousClosesOrHistoryProvider === "function" ? previousClosesOrHistoryProvider : historyProvider;
+  const nextPreviousCloses = { ...previousCloses };
   const filledSymbols: string[] = [];
   const missingSymbols: string[] = [];
 
   for (const symbol of Array.from(new Set(symbols))) {
-    if (nextQuotes[symbol] && nextQuotes[symbol] > 0) continue;
+    if (nextQuotes[symbol] && nextQuotes[symbol] > 0 && nextPreviousCloses[symbol] && nextPreviousCloses[symbol] > 0) continue;
     try {
-      const history = await historyProvider(symbol, 20);
+      const history = await resolvedHistoryProvider(symbol, 20);
       const latestClose = history[history.length - 1]?.close;
+      const previousClose = history[history.length - 2]?.close;
       if (latestClose && latestClose > 0) {
-        nextQuotes[symbol] = latestClose;
-        filledSymbols.push(symbol);
+        if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) {
+          nextQuotes[symbol] = latestClose;
+          filledSymbols.push(symbol);
+        }
+        if (previousClose && previousClose > 0) {
+          nextPreviousCloses[symbol] = previousClose;
+        }
       } else {
-        missingSymbols.push(symbol);
+        if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) missingSymbols.push(symbol);
       }
     } catch {
-      missingSymbols.push(symbol);
+      if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) missingSymbols.push(symbol);
     }
   }
 
-  return { quotes: nextQuotes, filledSymbols, missingSymbols };
+  return { quotes: nextQuotes, previousCloses: nextPreviousCloses, filledSymbols, missingSymbols };
 }
 
 export function paperCandidateFromLiveStock(item: LiveScreenedStock): PaperCandidate {
@@ -301,6 +320,7 @@ async function buildPortfolioResponse(options?: { forceQuote?: boolean }) {
 async function buildPaperTradingResponse(account: PaperAccount, options?: { forceQuote?: boolean }) {
   const warnings: string[] = [];
   let quotes: Record<string, number> = {};
+  let previousCloses: Record<string, number> = {};
   const scanState = await readCurrentPaperScanState();
   const holdingSymbols = account.holdings.map((holding) => holding.symbol);
 
@@ -308,14 +328,16 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
     if (shouldFetchPaperQuotes(holdingSymbols)) {
       const spot = await getSpotCached(options?.forceQuote);
       quotes = paperQuotePricesFromSpot(spot.stocks, holdingSymbols);
+      previousCloses = paperPreviousClosesFromSpot(spot.stocks, holdingSymbols);
     }
   } catch (error) {
     warnings.push(`模拟盘现价刷新失败，暂用成本价估算：${errorMessage(error)}`);
   }
 
   if (shouldFetchPaperQuotes(holdingSymbols)) {
-    const filled = await fillMissingPaperQuotePrices(holdingSymbols, quotes);
+    const filled = await fillMissingPaperQuotePrices(holdingSymbols, quotes, previousCloses);
     quotes = filled.quotes;
+    previousCloses = filled.previousCloses;
     if (filled.filledSymbols.length > 0) {
       warnings.push(`部分持仓实时现价缺失，已使用最近日线收盘价估值：${filled.filledSymbols.join(", ")}`);
     }
@@ -326,7 +348,7 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
 
   return {
     account,
-    summary: summarizePaperAccount(account, quotes),
+    summary: summarizePaperAccount(account, quotes, previousCloses),
     quoteStatus: {
       mode: warnings.length > 0 ? "fallback" : "live",
       warnings,

@@ -81,6 +81,7 @@ describe("shared api handlers", () => {
     });
 
     expect(result.quotes).toEqual({ "002179": 44.12, "600961": 29 });
+    expect(result.previousCloses).toEqual({ "002179": 42.73 });
     expect(result.filledSymbols).toEqual(["002179"]);
     expect(result.missingSymbols).toEqual([]);
   });

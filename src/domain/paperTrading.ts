@@ -56,8 +56,11 @@ export interface PaperAccount {
 
 export interface PaperHoldingSummary extends PaperHolding {
   currentPrice: number;
+  previousClose?: number;
   marketValue: number;
   costValue: number;
+  todayPnl?: number;
+  todayPnlPct?: number;
   unrealizedPnl: number;
   unrealizedPnlPct: number;
   weightPct: number;
@@ -144,18 +147,27 @@ export function createInitialPaperAccount(now = new Date().toISOString()): Paper
   };
 }
 
-export function summarizePaperAccount(account: PaperAccount, quotes: Record<string, number> = {}): PaperAccountSummary {
+export function summarizePaperAccount(
+  account: PaperAccount,
+  quotes: Record<string, number> = {},
+  previousCloses: Record<string, number> = {}
+): PaperAccountSummary {
   const holdings = account.holdings.map((holding) => {
     const currentPrice = quotes[holding.symbol] && quotes[holding.symbol] > 0 ? quotes[holding.symbol] : holding.avgCost;
+    const previousClose = previousCloses[holding.symbol] && previousCloses[holding.symbol] > 0 ? previousCloses[holding.symbol] : undefined;
     const marketValue = holding.quantity * currentPrice;
     const costValue = holding.quantity * holding.avgCost;
+    const todayPnl = previousClose === undefined ? undefined : (currentPrice - previousClose) * holding.quantity;
     const unrealizedPnl = marketValue - costValue;
 
     return {
       ...holding,
       currentPrice: round(currentPrice),
+      previousClose: previousClose === undefined ? undefined : round(previousClose),
       marketValue: round(marketValue),
       costValue: round(costValue),
+      todayPnl: todayPnl === undefined ? undefined : round(todayPnl),
+      todayPnlPct: previousClose === undefined ? undefined : round(((currentPrice / previousClose) - 1) * 100),
       unrealizedPnl: round(unrealizedPnl),
       unrealizedPnlPct: costValue > 0 ? round((unrealizedPnl / costValue) * 100) : 0,
       weightPct: 0

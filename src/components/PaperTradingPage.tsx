@@ -205,13 +205,19 @@ function HoldingDetail({ holding, bars, trades }: { holding: PaperHoldingSummary
 
   return (
     <tr className="holding-detail-row" data-testid={`paper-holding-detail-${holding.symbol}`}>
-      <td colSpan={9}>
+      <td colSpan={10}>
         <div className="holding-detail-grid">
           <MiniKline symbol={holding.symbol} bars={bars} />
           <div className="holding-detail-metrics">
             <div>
               <span>持仓天数</span>
               <strong>{holdingDays(holding.openedAt)} 天</strong>
+            </div>
+            <div>
+              <span>浮动盈亏</span>
+              <strong className={(holding.todayPnl ?? 0) >= 0 ? "gain" : "loss"}>
+                {money(holding.todayPnl)} / {pct(holding.todayPnlPct)}
+              </strong>
             </div>
             <div>
               <span>浮动盈亏</span>
@@ -238,6 +244,61 @@ function HoldingDetail({ holding, bars, trades }: { holding: PaperHoldingSummary
                   {tradeTime(trade.tradedAt)} · 金额 {money(trade.amount)}
                   {trade.realizedPnl !== undefined ? ` · 已实现 ${money(trade.realizedPnl)} (${pct(trade.realizedPnlPct)})` : ""}
                   {' · '}{trade.reason}
+                </small>
+              </div>
+            ))}
+            {trades.length === 0 ? <p className="empty-note">暂无该标的交易流水</p> : null}
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function HoldingDetailV2({ holding, bars, trades }: { holding: PaperHoldingSummary; bars: DailyBar[] | undefined; trades: PaperTrade[] }) {
+  const realizedPnl = trades.filter((trade) => trade.side === "sell").reduce((sum, trade) => sum + (trade.realizedPnl ?? 0), 0);
+
+  return (
+    <tr className="holding-detail-row" data-testid={`paper-holding-detail-${holding.symbol}`}>
+      <td colSpan={10}>
+        <div className="holding-detail-grid">
+          <MiniKline symbol={holding.symbol} bars={bars} />
+          <div className="holding-detail-metrics">
+            <div>
+              <span>持仓天数</span>
+              <strong>{holdingDays(holding.openedAt)} 天</strong>
+            </div>
+            <div>
+              <span>今日盈亏</span>
+              <strong className={(holding.todayPnl ?? 0) >= 0 ? "gain" : "loss"}>
+                {money(holding.todayPnl)} / {pct(holding.todayPnlPct)}
+              </strong>
+            </div>
+            <div>
+              <span>浮动盈亏</span>
+              <strong className={holding.unrealizedPnl >= 0 ? "gain" : "loss"}>
+                {money(holding.unrealizedPnl)} / {pct(holding.unrealizedPnlPct)}
+              </strong>
+            </div>
+            <div>
+              <span>已实现盈亏</span>
+              <strong className={realizedPnl >= 0 ? "gain" : "loss"}>{money(realizedPnl)}</strong>
+            </div>
+            <div>
+              <span>买入理由</span>
+              <strong>{holding.reason}</strong>
+            </div>
+          </div>
+          <div className="holding-trade-ledger" data-testid={`paper-holding-trades-${holding.symbol}`}>
+            <h4>交易流水</h4>
+            {trades.map((trade) => (
+              <div className="holding-trade-row" key={trade.id}>
+                <span className={`status-pill ${trade.side === "buy" ? "good" : "warn"}`}>{trade.side === "buy" ? "买入" : "卖出"}</span>
+                <strong>{trade.quantity} 股 @ {money(trade.price)}</strong>
+                <small>
+                  {tradeTime(trade.tradedAt)} · 金额 {money(trade.amount)}
+                  {trade.realizedPnl !== undefined ? ` · 已实现 ${money(trade.realizedPnl)} (${pct(trade.realizedPnlPct)})` : ""}
+                  {" · "}{trade.reason}
                 </small>
               </div>
             ))}
@@ -523,6 +584,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                 <th>成本</th>
                 <th>现价</th>
                 <th>市值</th>
+                <th>今日盈亏</th>
                 <th>盈亏</th>
                 <th>仓位</th>
                 <th>止损/止盈</th>
@@ -548,6 +610,10 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                       <td>{holding.avgCost}</td>
                       <td>{holding.currentPrice}</td>
                       <td>{money(holding.marketValue)}</td>
+                      <td className={(holding.todayPnl ?? 0) >= 0 ? "gain" : "loss"}>
+                        {money(holding.todayPnl)}
+                        <small>{pct(holding.todayPnlPct)}</small>
+                      </td>
                       <td className={holding.unrealizedPnl >= 0 ? "gain" : "loss"}>
                         {money(holding.unrealizedPnl)}
                         <small>{pct(holding.unrealizedPnlPct)}</small>
@@ -558,7 +624,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                       </td>
                     </tr>
                     {expandedHolding === holding.symbol ? (
-                      <HoldingDetail holding={holding} bars={historyBySymbol[holding.symbol]} trades={symbolTrades} />
+                      <HoldingDetailV2 holding={holding} bars={historyBySymbol[holding.symbol]} trades={symbolTrades} />
                     ) : null}
                   </Fragment>
                 );
