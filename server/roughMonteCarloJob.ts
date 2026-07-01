@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchAshareSpot, fetchBenchmarkHistory, fetchStockHistory } from "./eastmoneyProvider";
-import { prefilterSpotStocks, selectMarketCapUniverse, type DailyBar } from "../src/live/marketScreener";
+import { fetchBenchmarkHistory, fetchSpotForScreen, fetchStockHistory, type SpotProviderMode } from "./eastmoneyProvider";
+import { prefilterSpotStocks, selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/live/marketScreener";
 import {
   runMonteCarloFromClosedTrades,
   runRoughBacktest,
@@ -82,6 +82,18 @@ async function mapWithConcurrency<T, R>(items: T[], workers: number, fn: (item: 
   return results;
 }
 
+export async function loadRoughBacktestSpot(
+  provider = fetchSpotForScreen
+): Promise<{ total: number; stocks: SpotStock[]; warnings: string[]; mode: SpotProviderMode }> {
+  const result = await provider();
+  return {
+    total: result.spot.total,
+    stocks: result.spot.stocks,
+    warnings: result.warnings,
+    mode: result.mode
+  };
+}
+
 export function buildRoughBacktestMarkdown(input: {
   generatedAt: string;
   universeCount: number;
@@ -141,7 +153,10 @@ export async function runRoughMonteCarloJob(): Promise<{
 }> {
   await mkdir(OUTPUT_DIR, { recursive: true });
   const generatedAt = new Date().toISOString();
-  const spot = await fetchAshareSpot();
+  const spot = await loadRoughBacktestSpot();
+  if (spot.warnings.length > 0) {
+    process.stdout.write(`spot warnings: ${spot.warnings.join(" | ")}\n`);
+  }
   const marketCapUniverse = selectMarketCapUniverse(spot.stocks, MARKET_CAP_TOP_PCT);
   const pool = prefilterSpotStocks(marketCapUniverse, POOL_TARGET, {
     coreLimit: POOL_TARGET,
@@ -159,7 +174,7 @@ export async function runRoughMonteCarloJob(): Promise<{
     }
   });
   const universe = histories.filter((item): item is RoughUniverseItem => item !== null);
-  const backtest = runRoughBacktest({
+  const rawBacktest = runRoughBacktest({
     universe,
     benchmarkBars,
     config: {
@@ -170,6 +185,14 @@ export async function runRoughMonteCarloJob(): Promise<{
       maxTrialTotalPositionPct: 10
     }
   });
+  const backtest = {
+    ...rawBacktest,
+    warnings: [
+      ...rawBacktest.warnings,
+      ...spot.warnings.map((warning) => `Spot universe warning: ${warning}`),
+      `Spot universe provider mode: ${spot.mode}`
+    ]
+  };
   const monteCarlo = runMonteCarloFromClosedTrades(backtest.closedTrades, {
     initialCapital: 200_000,
     iterations: MONTE_CARLO_ITERATIONS,

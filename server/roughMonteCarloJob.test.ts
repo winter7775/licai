@@ -1,8 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { buildRoughBacktestMarkdown } from "./roughMonteCarloJob";
+import { buildRoughBacktestMarkdown, loadRoughBacktestSpot } from "./roughMonteCarloJob";
 import type { RoughBacktestResult, RoughMonteCarloResult } from "../src/backtest/roughBacktest";
 
 describe("rough monte carlo job report", () => {
+  it("loads the stock universe through a fallback-capable provider", async () => {
+    const result = await loadRoughBacktestSpot(async () => ({
+      mode: "sina",
+      warnings: ["fallback used"],
+      spot: {
+        total: 1,
+        stocks: [
+          {
+            symbol: "600000",
+            name: "浦发银行",
+            industry: "银行",
+            price: 10,
+            changePct: 0,
+            changeAmount: 0,
+            volume: 1000000,
+            amount: 100000000,
+            turnoverRate: 1,
+            peTtm: 10,
+            volumeRatio: 1,
+            high: 10,
+            low: 10,
+            open: 10,
+            previousClose: 10,
+            totalMarketCap: 100000000000,
+            floatMarketCap: 90000000000
+          }
+        ]
+      }
+    }));
+
+    expect(result.stocks).toHaveLength(1);
+    expect(result.warnings).toContain("fallback used");
+    expect(result.mode).toBe("sina");
+  });
+
   it("renders the key backtest and monte carlo metrics", () => {
     const backtest = {
       startedAt: "2016-07-01",
