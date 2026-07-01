@@ -67,6 +67,8 @@ async function historyWithCache(symbol: string, limit: number): Promise<DailyBar
   return bars;
 }
 
+const BENCHMARK_CACHE_SYMBOL = "benchmark-000300";
+
 async function mapWithConcurrency<T, R>(items: T[], workers: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = [];
   let cursor = 0;
@@ -92,6 +94,45 @@ export async function loadRoughBacktestSpot(
     warnings: result.warnings,
     mode: result.mode
   };
+}
+
+export async function loadRoughBacktestBenchmark(input: {
+  limit: number;
+  provider?: (limit: number) => Promise<DailyBar[]>;
+  readCache?: (symbol: string, limit: number) => Promise<DailyBar[] | null>;
+  writeCache?: (symbol: string, limit: number, bars: DailyBar[]) => Promise<void>;
+  fallbackBars?: DailyBar[];
+}): Promise<{ bars: DailyBar[]; warnings: string[] }> {
+  const provider = input.provider ?? fetchBenchmarkHistory;
+  const readCache = input.readCache ?? readHistoryCache;
+  const writeCache = input.writeCache ?? writeHistoryCache;
+  try {
+    const bars = await provider(input.limit);
+    if (bars.length > 0) {
+      await writeCache(BENCHMARK_CACHE_SYMBOL, input.limit, bars);
+      return { bars, warnings: [] };
+    }
+    throw new Error("benchmark provider returned empty history");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const cached = await readCache(BENCHMARK_CACHE_SYMBOL, input.limit);
+    if (cached && cached.length > 0) {
+      return {
+        bars: cached,
+        warnings: [`Benchmark history live fetch failed: ${message}`, "Using cached CSI300 benchmark history."]
+      };
+    }
+    if (input.fallbackBars && input.fallbackBars.length >= 260) {
+      return {
+        bars: input.fallbackBars,
+        warnings: [
+          `Benchmark history live fetch failed: ${message}`,
+          "Using proxy benchmark from the first usable stock history; relative-strength and market-regime gates are rough only."
+        ]
+      };
+    }
+    throw error;
+  }
 }
 
 export function buildRoughBacktestMarkdown(input: {
@@ -162,7 +203,6 @@ export async function runRoughMonteCarloJob(): Promise<{
     coreLimit: POOL_TARGET,
     rotationSeed: "rough-backtest"
   });
-  const benchmarkBars = await fetchBenchmarkHistory(HISTORY_LIMIT);
   const histories = await mapWithConcurrency(pool, 3, async (stock, index) => {
     process.stdout.write(`history ${index + 1}/${pool.length} ${stock.symbol}\n`);
     try {
@@ -174,9 +214,13 @@ export async function runRoughMonteCarloJob(): Promise<{
     }
   });
   const universe = histories.filter((item): item is RoughUniverseItem => item !== null);
+  const benchmark = await loadRoughBacktestBenchmark({
+    limit: HISTORY_LIMIT,
+    fallbackBars: universe[0]?.history
+  });
   const rawBacktest = runRoughBacktest({
     universe,
-    benchmarkBars,
+    benchmarkBars: benchmark.bars,
     config: {
       initialCapital: 200_000,
       maxExposurePct: 35,
@@ -189,6 +233,7 @@ export async function runRoughMonteCarloJob(): Promise<{
     ...rawBacktest,
     warnings: [
       ...rawBacktest.warnings,
+      ...benchmark.warnings,
       ...spot.warnings.map((warning) => `Spot universe warning: ${warning}`),
       `Spot universe provider mode: ${spot.mode}`
     ]

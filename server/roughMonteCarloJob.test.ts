@@ -1,8 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { buildRoughBacktestMarkdown, loadRoughBacktestSpot } from "./roughMonteCarloJob";
+import { buildRoughBacktestMarkdown, loadRoughBacktestBenchmark, loadRoughBacktestSpot } from "./roughMonteCarloJob";
 import type { RoughBacktestResult, RoughMonteCarloResult } from "../src/backtest/roughBacktest";
 
 describe("rough monte carlo job report", () => {
+  it("falls back to a proxy benchmark when the benchmark provider fails", async () => {
+    const fallbackBars = Array.from({ length: 260 }, (_, index) => ({
+      date: `2020-01-${String((index % 28) + 1).padStart(2, "0")}`,
+      open: 10,
+      close: 10 + index / 100,
+      high: 11,
+      low: 9,
+      volume: 1000,
+      amount: 1000000,
+      amplitudePct: 1,
+      changePct: 0,
+      changeAmount: 0,
+      turnoverRate: 1
+    }));
+
+    const result = await loadRoughBacktestBenchmark({
+      limit: 260,
+      provider: async () => {
+        throw new Error("benchmark api failed");
+      },
+      readCache: async () => null,
+      writeCache: async () => undefined,
+      fallbackBars
+    });
+
+    expect(result.bars).toHaveLength(260);
+    expect(result.warnings[0]).toContain("benchmark api failed");
+    expect(result.warnings[1]).toContain("proxy benchmark");
+  });
+
   it("loads the stock universe through a fallback-capable provider", async () => {
     const result = await loadRoughBacktestSpot(async () => ({
       mode: "sina",
