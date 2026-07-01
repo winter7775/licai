@@ -9,4 +9,15 @@ describe("python runtime resolution", () => {
   it("uses python3 on linux when no override is present", () => {
     expect(resolvePythonExecutable({ env: {}, platform: "linux", rootDir: "/app" })).toBe("python3");
   });
+
+  it("falls back to python on Windows when the bundled temporary interpreter is not present", () => {
+    expect(
+      resolvePythonExecutable({
+        env: {},
+        platform: "win32",
+        rootDir: "Z:/missing-root",
+        existsSync: () => false
+      })
+    ).toBe("python");
+  });
 });
