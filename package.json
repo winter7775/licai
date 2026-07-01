@@ -9,6 +9,7 @@
     "start": "tsx server/appServer.ts",
     "job:daily": "tsx server/dailyJob.ts",
     "job:rough-monte-carlo": "tsx server/roughMonteCarloJob.ts",
+    "job:strict-monthly-backtest": "tsx server/strictMonthlyBacktestJob.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
