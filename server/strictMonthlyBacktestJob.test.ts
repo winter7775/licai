@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { buildStrictMonthlyBacktestMarkdown } from "./strictMonthlyBacktestJob";
+import { buildStrictMonthlyBacktestMarkdown, selectStrictSourceUniverse } from "./strictMonthlyBacktestJob";
 import type { StrictBacktestResult, StrictMonteCarloResult } from "../src/backtest/strictMonthlyBacktest";
+import type { SpotStock } from "../src/live/marketScreener";
+
+function stock(symbol: string, totalMarketCap: number): SpotStock {
+  return {
+    symbol,
+    name: symbol,
+    industry: "test",
+    price: 10,
+    changePct: 0,
+    changeAmount: 0,
+    volume: 1_000_000,
+    amount: 100_000_000,
+    turnoverRate: 1,
+    peTtm: 20,
+    volumeRatio: 1,
+    high: 10,
+    low: 10,
+    open: 10,
+    previousClose: 10,
+    totalMarketCap,
+    floatMarketCap: totalMarketCap
+  };
+}
 
 describe("strict monthly backtest job report", () => {
+  it("keeps the full ranked source universe when the source limit is zero", () => {
+    const result = selectStrictSourceUniverse([stock("000001", 3), stock("000002", 2), stock("000003", 1)], {
+      marketCapTopPct: 1,
+      sourceLimit: 0
+    });
+
+    expect(result.map((item) => item.symbol)).toEqual(["000001", "000002", "000003"]);
+  });
+
   it("renders strict replay outputs and audit file location", () => {
     const backtest = {
       startedAt: "2016-07-01",
@@ -42,6 +74,7 @@ describe("strict monthly backtest job report", () => {
       generatedAt: "2026-07-01T10:00:00.000Z",
       sourceUniverseCount: 1600,
       usableUniverseCount: 800,
+      historyFailedCount: 40,
       historyYears: 10,
       auditPath: "/tmp/audit.jsonl",
       backtest,
@@ -50,6 +83,7 @@ describe("strict monthly backtest job report", () => {
 
     expect(markdown).toContain("Strict monthly top-pool backtest");
     expect(markdown).toContain("Final assets: 280,000");
+    expect(markdown).toContain("History failures/skips: 40");
     expect(markdown).toContain("Audit records: 1,600,000");
     expect(markdown).toContain("/tmp/audit.jsonl");
     expect(markdown).toContain("strict warning");

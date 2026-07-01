@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchStockHistory } from "./eastmoneyProvider";
 import { loadRoughBacktestBenchmark, loadRoughBacktestSpot } from "./roughMonteCarloJob";
-import { selectMarketCapUniverse, type DailyBar } from "../src/live/marketScreener";
+import { selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/live/marketScreener";
 import {
   runStrictMonthlyBacktest,
   runStrictMonteCarloFromClosedTrades,
@@ -18,11 +18,14 @@ const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(SERVER_DIR, "..");
 const CACHE_DIR = path.resolve(APP_DIR, "data/backtest-cache");
 const OUTPUT_DIR = path.resolve(APP_DIR, "output/backtests");
+const FULL_MODE = process.argv.includes("--full");
 const HISTORY_LIMIT = Number(process.env.STRICT_BACKTEST_HISTORY_LIMIT ?? 2600);
-const SOURCE_LIMIT = Number(process.env.STRICT_BACKTEST_SOURCE_LIMIT ?? 1600);
+const SOURCE_LIMIT = Number(process.env.STRICT_BACKTEST_SOURCE_LIMIT ?? (FULL_MODE ? 0 : 1600));
 const MONTHLY_POOL_SIZE = Number(process.env.STRICT_BACKTEST_MONTHLY_POOL_SIZE ?? 800);
-const MARKET_CAP_TOP_PCT = Number(process.env.STRICT_BACKTEST_MARKET_CAP_TOP_PCT ?? 0.3);
+const MARKET_CAP_TOP_PCT = Number(process.env.STRICT_BACKTEST_MARKET_CAP_TOP_PCT ?? (FULL_MODE ? 1 : 0.3));
 const MONTE_CARLO_ITERATIONS = Number(process.env.STRICT_BACKTEST_MONTE_CARLO_ITERATIONS ?? 5000);
+const HISTORY_WORKERS = Number(process.env.STRICT_BACKTEST_HISTORY_WORKERS ?? (FULL_MODE ? 1 : 3));
+const HISTORY_REQUEST_DELAY_MS = Number(process.env.STRICT_BACKTEST_REQUEST_DELAY_MS ?? (FULL_MODE ? 250 : 0));
 
 function shanghaiTimestamp(now = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -70,7 +73,16 @@ async function historyWithCache(symbol: string, limit: number): Promise<DailyBar
   return bars;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], workers: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+function sleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  workers: number,
+  fn: (item: T, index: number) => Promise<R>,
+  delayMs = 0
+): Promise<R[]> {
   const results: R[] = [];
   let cursor = 0;
   await Promise.all(
@@ -78,6 +90,7 @@ async function mapWithConcurrency<T, R>(items: T[], workers: number, fn: (item: 
       while (cursor < items.length) {
         const index = cursor;
         cursor += 1;
+        await sleep(delayMs);
         results[index] = await fn(items[index], index);
       }
     })
@@ -85,10 +98,20 @@ async function mapWithConcurrency<T, R>(items: T[], workers: number, fn: (item: 
   return results;
 }
 
+export function selectStrictSourceUniverse(
+  stocks: SpotStock[],
+  options: { marketCapTopPct: number; sourceLimit: number }
+): SpotStock[] {
+  const ranked = selectMarketCapUniverse(stocks, options.marketCapTopPct);
+  const limit = Math.floor(Number(options.sourceLimit) || 0);
+  return limit > 0 ? ranked.slice(0, limit) : ranked;
+}
+
 export function buildStrictMonthlyBacktestMarkdown(input: {
   generatedAt: string;
   sourceUniverseCount: number;
   usableUniverseCount: number;
+  historyFailedCount?: number;
   historyYears: number;
   auditPath: string;
   backtest: StrictBacktestResult;
@@ -102,6 +125,7 @@ export function buildStrictMonthlyBacktestMarkdown(input: {
     `Generated at: ${input.generatedAt}`,
     `Source universe: ${input.sourceUniverseCount}`,
     `Usable history universe: ${input.usableUniverseCount}`,
+    `History failures/skips: ${formatNumber(input.historyFailedCount ?? Math.max(0, input.sourceUniverseCount - input.usableUniverseCount))}`,
     `History length: about ${input.historyYears} years`,
     `Audit file: ${input.auditPath}`,
     "",
@@ -163,8 +187,11 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
   const auditPath = path.join(OUTPUT_DIR, `strict-monthly-${stamp}.audit.jsonl`);
   const auditStream = createWriteStream(auditPath, { encoding: "utf8" });
   const spot = await loadRoughBacktestSpot();
-  const marketCapUniverse = selectMarketCapUniverse(spot.stocks, MARKET_CAP_TOP_PCT).slice(0, SOURCE_LIMIT);
-  const histories = await mapWithConcurrency(marketCapUniverse, 3, async (stock, index) => {
+  const marketCapUniverse = selectStrictSourceUniverse(spot.stocks, {
+    marketCapTopPct: MARKET_CAP_TOP_PCT,
+    sourceLimit: SOURCE_LIMIT
+  });
+  const histories = await mapWithConcurrency(marketCapUniverse, HISTORY_WORKERS, async (stock, index) => {
     process.stdout.write(`strict history ${index + 1}/${marketCapUniverse.length} ${stock.symbol}\n`);
     try {
       const history = await historyWithCache(stock.symbol, HISTORY_LIMIT);
@@ -173,8 +200,9 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       process.stdout.write(`strict skip ${stock.symbol}: ${error instanceof Error ? error.message : String(error)}\n`);
       return null;
     }
-  });
+  }, HISTORY_REQUEST_DELAY_MS);
   const universe = histories.filter((item): item is StrictUniverseItem => item !== null);
+  const historyFailedCount = marketCapUniverse.length - universe.length;
   const benchmark = await loadRoughBacktestBenchmark({
     limit: HISTORY_LIMIT,
     fallbackBars: universe[0]?.history
@@ -221,6 +249,10 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       marketCapTopPct: MARKET_CAP_TOP_PCT,
       sourceUniverseCount: marketCapUniverse.length,
       usableUniverseCount: universe.length,
+      historyFailedCount,
+      fullMode: FULL_MODE,
+      historyWorkers: HISTORY_WORKERS,
+      historyRequestDelayMs: HISTORY_REQUEST_DELAY_MS,
       auditPath
     },
     backtest,
@@ -236,6 +268,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       sourceUniverseCount: marketCapUniverse.length,
       usableUniverseCount: universe.length,
       historyYears: Math.round(HISTORY_LIMIT / 250),
+      historyFailedCount,
       auditPath,
       backtest,
       monteCarlo
@@ -254,6 +287,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
             jsonPath: result.jsonPath,
             markdownPath: result.markdownPath,
             auditPath: result.auditPath,
+            fullMode: FULL_MODE,
             finalAssets: result.backtest.finalAssets,
             totalReturnPct: result.backtest.totalReturnPct,
             tradeCount: result.backtest.tradeCount,

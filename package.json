@@ -10,6 +10,7 @@
     "job:daily": "tsx server/dailyJob.ts",
     "job:rough-monte-carlo": "tsx server/roughMonteCarloJob.ts",
     "job:strict-monthly-backtest": "tsx server/strictMonthlyBacktestJob.ts",
+    "job:strict-full-backtest": "tsx server/strictMonthlyBacktestJob.ts --full",
     "test": "vitest run",
     "test:watch": "vitest"
   },
