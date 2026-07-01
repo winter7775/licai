@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildStrictMonthlyBacktestMarkdown, selectStrictSourceUniverse } from "./strictMonthlyBacktestJob";
+import {
+  buildHistoryMonthlyIndex,
+  buildMonthlySnapshotsFromHistoryIndexes,
+  buildStrictMonthlyBacktestMarkdown,
+  selectStrictSourceUniverse
+} from "./strictMonthlyBacktestJob";
 import type { StrictBacktestResult, StrictMonteCarloResult } from "../src/backtest/strictMonthlyBacktest";
-import type { SpotStock } from "../src/live/marketScreener";
+import type { DailyBar, SpotStock } from "../src/live/marketScreener";
 
 function stock(symbol: string, totalMarketCap: number): SpotStock {
   return {
@@ -25,7 +30,39 @@ function stock(symbol: string, totalMarketCap: number): SpotStock {
   };
 }
 
+function bar(date: string, amount: number): DailyBar {
+  return {
+    date,
+    open: 10,
+    close: 10,
+    high: 10,
+    low: 10,
+    volume: 1000,
+    amount,
+    amplitudePct: 0,
+    changePct: 0,
+    changeAmount: 0,
+    turnoverRate: 1
+  };
+}
+
 describe("strict monthly backtest job report", () => {
+  it("builds monthly snapshots from lightweight history indexes", () => {
+    const highInJanuary = buildHistoryMonthlyIndex(stock("000001", 1), [bar("2020-01-30", 900), bar("2020-02-03", 10)], 1);
+    const highInFebruaryOnly = buildHistoryMonthlyIndex(stock("000002", 1), [bar("2020-01-30", 20), bar("2020-02-03", 1000)], 1);
+
+    const snapshots = buildMonthlySnapshotsFromHistoryIndexes([highInJanuary, highInFebruaryOnly], 1);
+
+    expect(snapshots).toEqual([
+      {
+        activeMonth: "2020-02",
+        asOfDate: "2020-01-30",
+        symbols: ["000001"],
+        rankMetric: "trailing_amount"
+      }
+    ]);
+  });
+
   it("keeps the full ranked source universe when the source limit is zero", () => {
     const result = selectStrictSourceUniverse([stock("000001", 3), stock("000002", 2), stock("000003", 1)], {
       marketCapTopPct: 1,

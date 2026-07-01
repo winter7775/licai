@@ -93,6 +93,56 @@ describe("strict monthly universe snapshots", () => {
 });
 
 describe("strict monthly backtest replay", () => {
+  it("uses caller-provided monthly snapshots instead of rebuilding the pool from all loaded histories", () => {
+    const tradable = risingBars("000001");
+    const excluded = risingBars("000002");
+    excluded.history = excluded.history.map((daily) => ({ ...daily, amount: daily.amount * 10 }));
+    const benchmarkBars = tradable.history.map((daily) => ({ ...daily }));
+    const auditRecords: unknown[] = [];
+    const analyze = (currentStock: SpotStock, bars: DailyBar[]): HistoryAnalysis => {
+      const current = bars[bars.length - 1];
+      return {
+        signalType: "watch",
+        pivotPrice: current.close,
+        baseLow: current.close,
+        baseRangePct: 0,
+        stopPrice: current.close * 0.94,
+        stopLossWidthPct: 6,
+        buyExtensionPct: 0,
+        ma20: current.close,
+        ma60: current.close,
+        ma120: current.close,
+        rules: [
+          { id: "trend.template", name: "trend", actual: "ok", threshold: "ok", passed: true, severity: "hard", explanation: "" }
+        ]
+      };
+    };
+
+    runStrictMonthlyBacktest({
+      universe: [tradable, excluded],
+      benchmarkBars,
+      monthlySnapshots: [{ activeMonth: "2020-05", asOfDate: "2020-04-29", symbols: ["000001"], rankMetric: "trailing_amount" }],
+      config: {
+        initialCapital: 200_000,
+        warmupDays: 120,
+        monthlyPoolSize: 1,
+        monthlyPoolLookbackDays: 20,
+        maxExposurePct: 35,
+        maxSinglePositionPct: 10,
+        maxTrialSinglePositionPct: 3,
+        maxTrialTotalPositionPct: 10,
+        maxHoldings: 8,
+        minBuyAmount: 1_000,
+        lotSize: 100
+      },
+      analyze,
+      onAuditRecord: (record) => auditRecords.push(record)
+    });
+
+    expect(auditRecords.some((record) => (record as { symbol: string }).symbol === "000001")).toBe(true);
+    expect(auditRecords.some((record) => (record as { symbol: string }).symbol === "000002")).toBe(false);
+  });
+
   it("executes a signal on the next trading day's open and records auditable evidence", () => {
     const item = risingBars("000001");
     const benchmarkBars = item.history.map((daily) => ({ ...daily, close: daily.close * 0.98 }));

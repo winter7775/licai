@@ -9,6 +9,7 @@ import { selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/l
 import {
   runStrictMonthlyBacktest,
   runStrictMonteCarloFromClosedTrades,
+  type MonthlyUniverseSnapshot,
   type StrictBacktestResult,
   type StrictMonteCarloResult,
   type StrictUniverseItem
@@ -107,6 +108,68 @@ export function selectStrictSourceUniverse(
   return limit > 0 ? ranked.slice(0, limit) : ranked;
 }
 
+export interface HistoryMonthlyIndex {
+  stock: SpotStock;
+  entries: Array<{ activeMonth: string; asOfDate: string; metric: number }>;
+}
+
+function monthKey(date: string): string {
+  return date.slice(0, 7);
+}
+
+function mean(values: number[]): number {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function trailingAmount(history: DailyBar[], endIndex: number, lookbackDays: number): number {
+  const start = Math.max(0, endIndex - Math.max(1, lookbackDays) + 1);
+  return mean(history.slice(start, endIndex + 1).map((bar) => bar.amount));
+}
+
+export function buildHistoryMonthlyIndex(stock: SpotStock, history: DailyBar[], lookbackDays: number): HistoryMonthlyIndex {
+  const entries: HistoryMonthlyIndex["entries"] = [];
+  let previousMonth = "";
+  for (let index = 0; index < history.length; index += 1) {
+    const currentMonth = monthKey(history[index].date);
+    if (previousMonth && currentMonth !== previousMonth && index > 0) {
+      entries.push({
+        activeMonth: currentMonth,
+        asOfDate: history[index - 1].date,
+        metric: trailingAmount(history, index - 1, lookbackDays)
+      });
+    }
+    previousMonth = currentMonth;
+  }
+  return { stock, entries };
+}
+
+export function buildMonthlySnapshotsFromHistoryIndexes(indexes: HistoryMonthlyIndex[], poolSize: number): MonthlyUniverseSnapshot[] {
+  const byMonth = new Map<string, Array<{ symbol: string; asOfDate: string; metric: number }>>();
+  for (const index of indexes) {
+    for (const entry of index.entries) {
+      const rows = byMonth.get(entry.activeMonth) ?? [];
+      rows.push({ symbol: index.stock.symbol, asOfDate: entry.asOfDate, metric: entry.metric });
+      byMonth.set(entry.activeMonth, rows);
+    }
+  }
+  return [...byMonth.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([activeMonth, rows]) => {
+      const ranked = rows
+        .filter((row) => row.metric > 0)
+        .sort((left, right) => right.metric - left.metric || left.symbol.localeCompare(right.symbol))
+        .slice(0, Math.max(1, poolSize));
+      return {
+        activeMonth,
+        asOfDate: ranked.map((row) => row.asOfDate).sort().at(-1) ?? "",
+        symbols: ranked.map((row) => row.symbol),
+        rankMetric: "trailing_amount" as const
+      };
+    })
+    .filter((snapshot) => snapshot.symbols.length > 0);
+}
+
 export function buildStrictMonthlyBacktestMarkdown(input: {
   generatedAt: string;
   sourceUniverseCount: number;
@@ -191,18 +254,33 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
     marketCapTopPct: MARKET_CAP_TOP_PCT,
     sourceLimit: SOURCE_LIMIT
   });
-  const histories = await mapWithConcurrency(marketCapUniverse, HISTORY_WORKERS, async (stock, index) => {
-    process.stdout.write(`strict history ${index + 1}/${marketCapUniverse.length} ${stock.symbol}\n`);
+  const historyIndexes = await mapWithConcurrency(marketCapUniverse, HISTORY_WORKERS, async (stock, index) => {
+    process.stdout.write(`strict index ${index + 1}/${marketCapUniverse.length} ${stock.symbol}\n`);
     try {
       const history = await historyWithCache(stock.symbol, HISTORY_LIMIT);
-      return history.length >= 260 ? ({ stock, history } satisfies StrictUniverseItem) : null;
+      return history.length >= 260 ? buildHistoryMonthlyIndex(stock, history, 60) : null;
     } catch (error) {
       process.stdout.write(`strict skip ${stock.symbol}: ${error instanceof Error ? error.message : String(error)}\n`);
       return null;
     }
   }, HISTORY_REQUEST_DELAY_MS);
-  const universe = histories.filter((item): item is StrictUniverseItem => item !== null);
-  const historyFailedCount = marketCapUniverse.length - universe.length;
+  const usableIndexes = historyIndexes.filter((item): item is HistoryMonthlyIndex => item !== null);
+  const monthlySnapshots = buildMonthlySnapshotsFromHistoryIndexes(usableIndexes, MONTHLY_POOL_SIZE);
+  const requiredSymbols = new Set(monthlySnapshots.flatMap((snapshot) => snapshot.symbols));
+  const sourceBySymbol = new Map(marketCapUniverse.map((stock) => [stock.symbol, stock]));
+  const requiredStocks = [...requiredSymbols].map((symbol) => sourceBySymbol.get(symbol)).filter((stock): stock is SpotStock => Boolean(stock));
+  const universeRows = await mapWithConcurrency(requiredStocks, HISTORY_WORKERS, async (stock, index) => {
+    process.stdout.write(`strict replay history ${index + 1}/${requiredStocks.length} ${stock.symbol}\n`);
+    try {
+      const history = await historyWithCache(stock.symbol, HISTORY_LIMIT);
+      return history.length >= 260 ? ({ stock, history } satisfies StrictUniverseItem) : null;
+    } catch (error) {
+      process.stdout.write(`strict replay skip ${stock.symbol}: ${error instanceof Error ? error.message : String(error)}\n`);
+      return null;
+    }
+  }, HISTORY_REQUEST_DELAY_MS);
+  const universe = universeRows.filter((item): item is StrictUniverseItem => item !== null);
+  const historyFailedCount = marketCapUniverse.length - usableIndexes.length;
   const benchmark = await loadRoughBacktestBenchmark({
     limit: HISTORY_LIMIT,
     fallbackBars: universe[0]?.history
@@ -210,6 +288,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
   const rawBacktest = runStrictMonthlyBacktest({
     universe,
     benchmarkBars: benchmark.bars,
+    monthlySnapshots,
     config: {
       initialCapital: 200_000,
       monthlyPoolSize: MONTHLY_POOL_SIZE,
@@ -232,7 +311,10 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       ...benchmark.warnings,
       ...spot.warnings.map((warning) => `Spot universe warning: ${warning}`),
       `Spot universe provider mode: ${spot.mode}`,
-      `Source universe is capped at ${SOURCE_LIMIT} current top-market-cap stocks before historical monthly replay.`
+      SOURCE_LIMIT > 0
+        ? `Source universe is capped at ${SOURCE_LIMIT} current top-market-cap stocks before historical monthly replay.`
+        : "Source universe uses the full current A-share spot universe before historical monthly replay.",
+      `Two-pass replay loaded ${universe.length} stocks from ${requiredStocks.length} monthly-pool symbols after indexing ${usableIndexes.length} usable source histories.`
     ]
   };
   const monteCarlo = runStrictMonteCarloFromClosedTrades(backtest.closedTrades, {
@@ -248,7 +330,10 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       monthlyPoolSize: MONTHLY_POOL_SIZE,
       marketCapTopPct: MARKET_CAP_TOP_PCT,
       sourceUniverseCount: marketCapUniverse.length,
-      usableUniverseCount: universe.length,
+      usableUniverseCount: usableIndexes.length,
+      replayUniverseCount: universe.length,
+      monthlySnapshotCount: monthlySnapshots.length,
+      requiredReplaySymbols: requiredStocks.length,
       historyFailedCount,
       fullMode: FULL_MODE,
       historyWorkers: HISTORY_WORKERS,
@@ -266,7 +351,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
     buildStrictMonthlyBacktestMarkdown({
       generatedAt,
       sourceUniverseCount: marketCapUniverse.length,
-      usableUniverseCount: universe.length,
+      usableUniverseCount: usableIndexes.length,
       historyYears: Math.round(HISTORY_LIMIT / 250),
       historyFailedCount,
       auditPath,

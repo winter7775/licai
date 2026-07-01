@@ -345,6 +345,7 @@ function tradeStats(closedTrades: StrictClosedTrade[], initialCapital: number, e
 export function runStrictMonthlyBacktest(input: {
   universe: StrictUniverseItem[];
   benchmarkBars: DailyBar[];
+  monthlySnapshots?: MonthlyUniverseSnapshot[];
   config?: Partial<StrictBacktestConfig>;
   analyze?: (stock: SpotStock, bars: DailyBar[], options: { benchmarkBars?: DailyBar[] }) => HistoryAnalysis;
   onAuditRecord?: (record: StrictAuditRecord) => void;
@@ -352,12 +353,14 @@ export function runStrictMonthlyBacktest(input: {
   const config = { ...DEFAULT_CONFIG, ...input.config };
   const analyze = input.analyze ?? analyzeHistory;
   const benchmarkDates = [...new Set(input.benchmarkBars.map((bar) => bar.date))].sort();
-  const monthlySnapshots = buildMonthlyUniverseSnapshots({
-    universe: input.universe,
-    tradeDates: benchmarkDates,
-    poolSize: config.monthlyPoolSize,
-    lookbackDays: config.monthlyPoolLookbackDays
-  });
+  const monthlySnapshots =
+    input.monthlySnapshots ??
+    buildMonthlyUniverseSnapshots({
+      universe: input.universe,
+      tradeDates: benchmarkDates,
+      poolSize: config.monthlyPoolSize,
+      lookbackDays: config.monthlyPoolLookbackDays
+    });
   const snapshotByMonth = new Map(monthlySnapshots.map((snapshot) => [snapshot.activeMonth, snapshot]));
   const barMaps = new Map(input.universe.map((item) => [item.stock.symbol, barByDate(item.history)]));
   const indexMaps = new Map(input.universe.map((item) => [item.stock.symbol, historyIndexByDate(item.history)]));
