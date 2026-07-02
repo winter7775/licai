@@ -224,9 +224,14 @@ export async function runRoughMonteCarloJob(): Promise<{
     config: {
       initialCapital: 200_000,
       maxExposurePct: 35,
-      maxSinglePositionPct: 10,
+      healthyTrendExposurePct: 70,
+      strongTrendExposurePct: 90,
+      maxSinglePositionPct: 12,
       maxTrialSinglePositionPct: 3,
-      maxTrialTotalPositionPct: 10
+      maxTrialTotalPositionPct: 10,
+      riskPerTradePct: 1,
+      trialRiskPerTradePct: 0.3,
+      maxPortfolioRiskPct: 6
     }
   });
   const backtest = {

@@ -115,13 +115,20 @@ describe("strict monthly backtest job report", () => {
       historyYears: 10,
       auditPath: "/tmp/audit.jsonl",
       backtest,
-      monteCarlo
+      monteCarlo,
+      variants: [
+        { label: "A-only", backtest: { ...backtest, finalAssets: 260_000, totalReturnPct: 30, tradeCount: 60 } },
+        { label: "B-only", backtest: { ...backtest, finalAssets: 220_000, totalReturnPct: 10, tradeCount: 20 } }
+      ]
     });
 
     expect(markdown).toContain("Strict monthly top-pool backtest");
     expect(markdown).toContain("Final assets: 280,000");
     expect(markdown).toContain("History failures/skips: 40");
     expect(markdown).toContain("Audit records: 1,600,000");
+    expect(markdown).toContain("## A/B signal comparison");
+    expect(markdown).toContain("A-only");
+    expect(markdown).toContain("B-only");
     expect(markdown).toContain("/tmp/audit.jsonl");
     expect(markdown).toContain("strict warning");
   });

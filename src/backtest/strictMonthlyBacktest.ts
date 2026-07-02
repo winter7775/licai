@@ -2,7 +2,14 @@ import { analysisScore, analyzeHistory, type DailyBar, type HistoryAnalysis, typ
 import { calculateAtr, calculateProfitProtectionStop, type ProfitProtectionStage } from "../domain/profitProtection";
 import type { RuleResult, SignalType } from "../domain/types";
 import {
+  canBuyAtOpen,
+  buildTradeFill,
+  executionPrice,
+  isLimitDownLocked
+} from "./tradeExecution";
+import {
   calculateRoughPositionSize,
+  calculateBenchmarkExposureLimit,
   runMonteCarloFromClosedTrades,
   type RoughBacktestConfig,
   type RoughClosedTrade,
@@ -146,6 +153,11 @@ const DEFAULT_CONFIG: StrictBacktestConfig = {
   maxHoldings: 8,
   minBuyAmount: 5_000,
   lotSize: 100,
+  riskPerTradePct: 1,
+  trialRiskPerTradePct: 0.3,
+  maxPortfolioRiskPct: 6,
+  healthyTrendExposurePct: 70,
+  strongTrendExposurePct: 90,
   monthlyPoolSize: 800,
   monthlyPoolLookbackDays: 60
 };
@@ -274,17 +286,8 @@ function candidateGrade(signalType: SignalType, rules: RuleResult[], price: numb
   return breakout.extensionPct >= -3 && breakout.extensionPct <= 3 && breakout.volumeRatio >= 0.9 ? "B" : null;
 }
 
-function benchmarkMaxExposure(benchmark: DailyBar[], fallback: number): number {
-  if (benchmark.length < 120) return 0;
-  const closes = benchmark.map((bar) => bar.close);
-  const close = closes[closes.length - 1];
-  const ma20 = mean(closes.slice(-20)) ?? close;
-  const ma60 = mean(closes.slice(-60)) ?? close;
-  const ma120 = mean(closes.slice(-120)) ?? close;
-  const ma60Before = mean(closes.slice(-80, -20)) ?? ma60;
-  if (close < ma120 * 0.98) return 0;
-  if (close >= ma20 && ma20 >= ma60 * 0.99 && ma60 >= ma120 * 0.98 && ma60 >= ma60Before * 0.99) return Math.max(fallback, 60);
-  return fallback;
+function benchmarkMaxExposure(benchmark: DailyBar[], config: StrictBacktestConfig): number {
+  return calculateBenchmarkExposureLimit(benchmark, config);
 }
 
 function marketValue(holdings: Holding[], quoteFor: (symbol: string) => number | undefined): number {
@@ -295,6 +298,10 @@ function trialMarketValue(holdings: Holding[], quoteFor: (symbol: string) => num
   return holdings
     .filter((holding) => holding.grade === "B")
     .reduce((sum, holding) => sum + holding.quantity * (quoteFor(holding.symbol) ?? holding.avgCost), 0);
+}
+
+function portfolioRiskAmount(holdings: Holding[]): number {
+  return holdings.reduce((sum, holding) => sum + Math.max(0, holding.avgCost - holding.stopPrice) * holding.quantity, 0);
 }
 
 function stopReason(holding: Holding): string {
@@ -428,35 +435,42 @@ export function runStrictMonthlyBacktest(input: {
     for (const order of executableBuys) {
       if (holdings.length >= config.maxHoldings || holdings.some((holding) => holding.symbol === order.symbol)) continue;
       const executionBar = barMaps.get(order.symbol)?.get(date);
-      if (!executionBar || executionBar.open <= 0) continue;
+      const executionIndex = indexMaps.get(order.symbol)?.get(date);
+      const previousBar =
+        executionIndex === undefined || executionIndex <= 0 ? undefined : historyBySymbol.get(order.symbol)?.[executionIndex - 1];
+      if (!executionBar || !canBuyAtOpen(order.symbol, executionBar, previousBar, config)) continue;
+      const buyPrice = executionPrice("buy", executionBar.open, config);
       const currentMv = marketValue(holdings, quoteFor);
       const totalAssets = round(cash + currentMv);
       const sizing: RoughPositionSizing = calculateRoughPositionSize({
         grade: order.grade,
-        price: executionBar.open,
+        price: buyPrice,
         totalAssets,
         cash,
         currentMarketValue: currentMv,
         currentTrialMarketValue: trialMarketValue(holdings, quoteFor),
-        maxExposurePct: benchmarkMaxExposure(benchmarkHistory, config.maxExposurePct),
-        config
+        currentPortfolioRiskAmount: portfolioRiskAmount(holdings),
+        maxExposurePct: benchmarkMaxExposure(benchmarkHistory, config),
+        config,
+        stopPrice: order.stopPrice
       });
       if (!sizing.canBuy) continue;
-      cash = round(cash - sizing.amount);
+      const fill = buildTradeFill("buy", executionBar.open, sizing.quantity, config);
+      cash = round(cash - fill.netCashAmount);
       holdings.push({
         symbol: order.symbol,
         name: order.name,
         quantity: sizing.quantity,
-        avgCost: round(executionBar.open),
+        avgCost: fill.price,
         initialStopPrice: order.stopPrice,
         stopPrice: order.stopPrice,
-        highestPriceSinceEntry: round(executionBar.open),
+        highestPriceSinceEntry: fill.price,
         profitProtectionStage: "initial",
         protectedProfitPct: 0,
-        takeProfitPrice: round(executionBar.open * 1.4),
+        takeProfitPrice: round(fill.price * 1.4),
         grade: order.grade,
         entryDate: date,
-        entryAmount: sizing.amount,
+        entryAmount: fill.netCashAmount,
         entryPositionPct: sizing.positionPct,
         reason: order.reason
       });
@@ -465,12 +479,16 @@ export function runStrictMonthlyBacktest(input: {
         name: order.name,
         side: "buy",
         date,
-        price: round(executionBar.open),
+        price: fill.price,
         quantity: sizing.quantity,
-        amount: sizing.amount,
+        amount: fill.netCashAmount,
         grade: order.grade,
         reason: `${order.reason}; signalDate=${order.signalDate}; score=${round(order.score)}`,
-        positionPct: sizing.positionPct
+        positionPct: sizing.positionPct,
+        fees: fill.fees,
+        slippageAmount: fill.slippageAmount,
+        rawPrice: fill.rawPrice,
+        grossAmount: fill.grossAmount
       });
     }
 
@@ -483,16 +501,24 @@ export function runStrictMonthlyBacktest(input: {
       }
       const stopHit = bar.low <= holding.stopPrice;
       const takeProfitHit = bar.high >= holding.takeProfitPrice;
-      if (!stopHit && !takeProfitHit) {
-        const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+      const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+      const previousBar =
+        itemIndex === undefined || itemIndex <= 0 ? undefined : historyBySymbol.get(holding.symbol)?.[itemIndex - 1];
+      if (stopHit && (config.blockLimitDownStops ?? true) && isLimitDownLocked(holding.symbol, bar, previousBar)) {
         const history = itemIndex === undefined ? [bar] : (historyBySymbol.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
         nextHoldings.push(refreshHoldingRisk(holding, history, bar));
         continue;
       }
-      const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
-      const amount = round(holding.quantity * exitPrice);
-      const pnl = round((exitPrice - holding.avgCost) * holding.quantity);
-      const returnPct = round(((exitPrice / holding.avgCost) - 1) * 100);
+      if (!stopHit && !takeProfitHit) {
+        const history = itemIndex === undefined ? [bar] : (historyBySymbol.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
+        nextHoldings.push(refreshHoldingRisk(holding, history, bar));
+        continue;
+      }
+      const rawExitPrice = stopHit ? Math.min(holding.stopPrice, bar.open) : holding.takeProfitPrice;
+      const fill = buildTradeFill("sell", rawExitPrice, holding.quantity, config);
+      const amount = fill.netCashAmount;
+      const pnl = round(amount - holding.entryAmount);
+      const returnPct = round((pnl / holding.entryAmount) * 100);
       cash = round(cash + amount);
       const exitReason = stopHit ? stopReason(holding) : "take_profit";
       trades.push({
@@ -500,14 +526,18 @@ export function runStrictMonthlyBacktest(input: {
         name: holding.name,
         side: "sell",
         date,
-        price: round(exitPrice),
+        price: fill.price,
         quantity: holding.quantity,
         amount,
         grade: holding.grade,
         reason: exitReason,
         pnl,
         returnPct,
-        positionPct: holding.entryPositionPct
+        positionPct: holding.entryPositionPct,
+        fees: fill.fees,
+        slippageAmount: fill.slippageAmount,
+        rawPrice: fill.rawPrice,
+        grossAmount: fill.grossAmount
       });
       closedTrades.push({
         symbol: holding.symbol,
@@ -515,7 +545,7 @@ export function runStrictMonthlyBacktest(input: {
         entryDate: holding.entryDate,
         exitDate: date,
         entryPrice: holding.avgCost,
-        exitPrice: round(exitPrice),
+        exitPrice: fill.price,
         holdingDays: Math.max(1, benchmarkDates.indexOf(date) - benchmarkDates.indexOf(holding.entryDate)),
         returnPct,
         positionPct: holding.entryPositionPct,
@@ -530,7 +560,7 @@ export function runStrictMonthlyBacktest(input: {
     const snapshot = snapshotByMonth.get(monthKey(date));
     const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
     const candidates: Candidate[] = [];
-    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config.maxExposurePct);
+    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config);
     if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
       for (const symbol of snapshot.symbols) {
         const stock = stockBySymbol.get(symbol);
@@ -605,6 +635,7 @@ export function runStrictMonthlyBacktest(input: {
             reason: grade ? `${analysis.signalType} signal for next trading day` : rules.failedHardRules[0] ?? "watch only"
           });
           if (!grade) continue;
+          if (config.allowedGrades && !config.allowedGrades.includes(grade)) continue;
           candidates.push({
             symbol,
             name: stock.name,
@@ -746,7 +777,7 @@ export async function runStrictMonthlyBacktestLazy(input: {
     const currentMonth = monthKey(date);
     const benchmarkHistory = input.benchmarkBars.slice(0, benchmarkEndIndex + 1);
     const snapshot = snapshotByMonth.get(currentMonth);
-    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config.maxExposurePct);
+    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config);
     const neededSymbols = new Set<string>([
       ...holdings.map((holding) => holding.symbol),
       ...pendingBuys.map((order) => order.symbol)
@@ -770,35 +801,42 @@ export async function runStrictMonthlyBacktestLazy(input: {
     for (const order of executableBuys) {
       if (holdings.length >= config.maxHoldings || holdings.some((holding) => holding.symbol === order.symbol)) continue;
       const executionBar = barMaps.get(order.symbol)?.get(date);
-      if (!executionBar || executionBar.open <= 0) continue;
+      const executionIndex = indexMaps.get(order.symbol)?.get(date);
+      const previousBar =
+        executionIndex === undefined || executionIndex <= 0 ? undefined : histories.get(order.symbol)?.[executionIndex - 1];
+      if (!executionBar || !canBuyAtOpen(order.symbol, executionBar, previousBar, config)) continue;
+      const buyPrice = executionPrice("buy", executionBar.open, config);
       const currentMv = marketValue(holdings, quoteFor);
       const totalAssets = round(cash + currentMv);
       const sizing: RoughPositionSizing = calculateRoughPositionSize({
         grade: order.grade,
-        price: executionBar.open,
+        price: buyPrice,
         totalAssets,
         cash,
         currentMarketValue: currentMv,
         currentTrialMarketValue: trialMarketValue(holdings, quoteFor),
+        currentPortfolioRiskAmount: portfolioRiskAmount(holdings),
         maxExposurePct,
-        config
+        config,
+        stopPrice: order.stopPrice
       });
       if (!sizing.canBuy) continue;
-      cash = round(cash - sizing.amount);
+      const fill = buildTradeFill("buy", executionBar.open, sizing.quantity, config);
+      cash = round(cash - fill.netCashAmount);
       holdings.push({
         symbol: order.symbol,
         name: order.name,
         quantity: sizing.quantity,
-        avgCost: round(executionBar.open),
+        avgCost: fill.price,
         initialStopPrice: order.stopPrice,
         stopPrice: order.stopPrice,
-        highestPriceSinceEntry: round(executionBar.open),
+        highestPriceSinceEntry: fill.price,
         profitProtectionStage: "initial",
         protectedProfitPct: 0,
-        takeProfitPrice: round(executionBar.open * 1.4),
+        takeProfitPrice: round(fill.price * 1.4),
         grade: order.grade,
         entryDate: date,
-        entryAmount: sizing.amount,
+        entryAmount: fill.netCashAmount,
         entryPositionPct: sizing.positionPct,
         reason: order.reason
       });
@@ -807,12 +845,16 @@ export async function runStrictMonthlyBacktestLazy(input: {
         name: order.name,
         side: "buy",
         date,
-        price: round(executionBar.open),
+        price: fill.price,
         quantity: sizing.quantity,
-        amount: sizing.amount,
+        amount: fill.netCashAmount,
         grade: order.grade,
         reason: `${order.reason}; signalDate=${order.signalDate}; score=${round(order.score)}`,
-        positionPct: sizing.positionPct
+        positionPct: sizing.positionPct,
+        fees: fill.fees,
+        slippageAmount: fill.slippageAmount,
+        rawPrice: fill.rawPrice,
+        grossAmount: fill.grossAmount
       });
     }
 
@@ -825,16 +867,24 @@ export async function runStrictMonthlyBacktestLazy(input: {
       }
       const stopHit = bar.low <= holding.stopPrice;
       const takeProfitHit = bar.high >= holding.takeProfitPrice;
-      if (!stopHit && !takeProfitHit) {
-        const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+      const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+      const previousBar =
+        itemIndex === undefined || itemIndex <= 0 ? undefined : histories.get(holding.symbol)?.[itemIndex - 1];
+      if (stopHit && (config.blockLimitDownStops ?? true) && isLimitDownLocked(holding.symbol, bar, previousBar)) {
         const history = itemIndex === undefined ? [bar] : (histories.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
         nextHoldings.push(refreshHoldingRisk(holding, history, bar));
         continue;
       }
-      const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
-      const amount = round(holding.quantity * exitPrice);
-      const pnl = round((exitPrice - holding.avgCost) * holding.quantity);
-      const returnPct = round(((exitPrice / holding.avgCost) - 1) * 100);
+      if (!stopHit && !takeProfitHit) {
+        const history = itemIndex === undefined ? [bar] : (histories.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
+        nextHoldings.push(refreshHoldingRisk(holding, history, bar));
+        continue;
+      }
+      const rawExitPrice = stopHit ? Math.min(holding.stopPrice, bar.open) : holding.takeProfitPrice;
+      const fill = buildTradeFill("sell", rawExitPrice, holding.quantity, config);
+      const amount = fill.netCashAmount;
+      const pnl = round(amount - holding.entryAmount);
+      const returnPct = round((pnl / holding.entryAmount) * 100);
       cash = round(cash + amount);
       const exitReason = stopHit ? stopReason(holding) : "take_profit";
       trades.push({
@@ -842,14 +892,18 @@ export async function runStrictMonthlyBacktestLazy(input: {
         name: holding.name,
         side: "sell",
         date,
-        price: round(exitPrice),
+        price: fill.price,
         quantity: holding.quantity,
         amount,
         grade: holding.grade,
         reason: exitReason,
         pnl,
         returnPct,
-        positionPct: holding.entryPositionPct
+        positionPct: holding.entryPositionPct,
+        fees: fill.fees,
+        slippageAmount: fill.slippageAmount,
+        rawPrice: fill.rawPrice,
+        grossAmount: fill.grossAmount
       });
       closedTrades.push({
         symbol: holding.symbol,
@@ -857,7 +911,7 @@ export async function runStrictMonthlyBacktestLazy(input: {
         entryDate: holding.entryDate,
         exitDate: date,
         entryPrice: holding.avgCost,
-        exitPrice: round(exitPrice),
+        exitPrice: fill.price,
         holdingDays: Math.max(1, benchmarkDates.indexOf(date) - benchmarkDates.indexOf(holding.entryDate)),
         returnPct,
         positionPct: holding.entryPositionPct,
@@ -945,6 +999,7 @@ export async function runStrictMonthlyBacktestLazy(input: {
             reason: grade ? `${analysis.signalType} signal for next trading day` : rules.failedHardRules[0] ?? "watch only"
           });
           if (!grade) continue;
+          if (config.allowedGrades && !config.allowedGrades.includes(grade)) continue;
           candidates.push({
             symbol,
             name: stock.name,

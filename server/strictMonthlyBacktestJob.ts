@@ -26,6 +26,26 @@ const MARKET_CAP_TOP_PCT = Number(process.env.STRICT_BACKTEST_MARKET_CAP_TOP_PCT
 const MONTE_CARLO_ITERATIONS = Number(process.env.STRICT_BACKTEST_MONTE_CARLO_ITERATIONS ?? 5000);
 const HISTORY_WORKERS = Number(process.env.STRICT_BACKTEST_HISTORY_WORKERS ?? (FULL_MODE ? 1 : 3));
 const HISTORY_REQUEST_DELAY_MS = Number(process.env.STRICT_BACKTEST_REQUEST_DELAY_MS ?? (FULL_MODE ? 250 : 0));
+const STRICT_BACKTEST_CONFIG = {
+  initialCapital: 200_000,
+  monthlyPoolSize: MONTHLY_POOL_SIZE,
+  monthlyPoolLookbackDays: 60,
+  maxExposurePct: 35,
+  healthyTrendExposurePct: 70,
+  strongTrendExposurePct: 90,
+  maxSinglePositionPct: 12,
+  maxTrialSinglePositionPct: 3,
+  maxTrialTotalPositionPct: 10,
+  riskPerTradePct: 1,
+  trialRiskPerTradePct: 0.3,
+  maxPortfolioRiskPct: 6,
+  slippagePct: 0.1,
+  commissionPct: 0.025,
+  transferFeePct: 0.001,
+  stampDutyPct: 0.05,
+  blockLimitOpenBuys: true,
+  blockLimitDownStops: true
+};
 
 function shanghaiTimestamp(now = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -178,9 +198,31 @@ export function buildStrictMonthlyBacktestMarkdown(input: {
   auditPath: string;
   backtest: StrictBacktestResult;
   monteCarlo: StrictMonteCarloResult;
+  variants?: Array<{ label: string; backtest: StrictBacktestResult }>;
 }): string {
   const backtest = input.backtest;
   const monteCarlo = input.monteCarlo;
+  const variantLines =
+    input.variants && input.variants.length > 0
+      ? [
+          "",
+          "## A/B signal comparison",
+          "",
+          "| Mode | Final assets | Total return | Max drawdown | Trades | Win rate | Profit factor |",
+          "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+          ...input.variants.map(({ label, backtest: item }) =>
+            [
+              `| ${label}`,
+              formatNumber(item.finalAssets),
+              formatPct(item.totalReturnPct),
+              formatPct(item.maxDrawdownPct),
+              String(item.tradeCount),
+              formatPct(item.winRatePct),
+              item.profitFactor === null ? "no loss samples" : item.profitFactor.toFixed(2)
+            ].join(" | ") + " |"
+          )
+        ]
+      : [];
   return [
     "# Strict monthly top-pool backtest + Monte Carlo",
     "",
@@ -229,6 +271,7 @@ export function buildStrictMonthlyBacktestMarkdown(input: {
     `- Max drawdown P95: ${formatPct(monteCarlo.maxDrawdownPct.p95)}`,
     `- Loss probability: ${formatPct(monteCarlo.lossProbabilityPct)}`,
     `- Severe drawdown probability: ${formatPct(monteCarlo.severeDrawdownProbabilityPct)}`,
+    ...variantLines,
     "",
     "## Warnings and limits",
     "",
@@ -242,6 +285,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
   auditPath: string;
   backtest: StrictBacktestResult;
   monteCarlo: StrictMonteCarloResult;
+  variants: Array<{ label: string; backtest: StrictBacktestResult }>;
 }> {
   await mkdir(OUTPUT_DIR, { recursive: true });
   const generatedAt = new Date().toISOString();
@@ -279,15 +323,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
     benchmarkBars: benchmark.bars,
     monthlySnapshots,
     loadHistory: (symbol) => historyWithCache(symbol, HISTORY_LIMIT),
-    config: {
-      initialCapital: 200_000,
-      monthlyPoolSize: MONTHLY_POOL_SIZE,
-      monthlyPoolLookbackDays: 60,
-      maxExposurePct: 35,
-      maxSinglePositionPct: 10,
-      maxTrialSinglePositionPct: 3,
-      maxTrialTotalPositionPct: 10
-    },
+    config: STRICT_BACKTEST_CONFIG,
     onMonthStart: (info) => {
       process.stdout.write(`strict replay month ${info.activeMonth} ${info.date} load ${info.loadedSymbolCount}\n`);
     },
@@ -310,6 +346,27 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       `Lazy replay streams ${requiredStocks.length} monthly-pool symbols after indexing ${usableIndexes.length} usable source histories.`
     ]
   };
+  const variants = await Promise.all(
+    [
+      { label: "A-only", allowedGrades: ["A"] as const },
+      { label: "B-only", allowedGrades: ["B"] as const }
+    ].map(async (variant) => {
+      const result = await runStrictMonthlyBacktestLazy({
+        stocks: requiredStocks,
+        benchmarkBars: benchmark.bars,
+        monthlySnapshots,
+        loadHistory: (symbol) => historyWithCache(symbol, HISTORY_LIMIT),
+        config: {
+          ...STRICT_BACKTEST_CONFIG,
+          allowedGrades: [...variant.allowedGrades]
+        },
+        onMonthStart: (info) => {
+          process.stdout.write(`strict replay ${variant.label} month ${info.activeMonth} ${info.date} load ${info.loadedSymbolCount}\n`);
+        }
+      });
+      return { label: variant.label, backtest: { ...result, warnings: backtest.warnings } };
+    })
+  );
   const monteCarlo = runStrictMonteCarloFromClosedTrades(backtest.closedTrades, {
     initialCapital: 200_000,
     iterations: MONTE_CARLO_ITERATIONS,
@@ -334,7 +391,8 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       auditPath
     },
     backtest,
-    monteCarlo
+    monteCarlo,
+    variants
   };
   const jsonPath = path.join(OUTPUT_DIR, `strict-monthly-${stamp}.json`);
   const markdownPath = path.join(OUTPUT_DIR, `strict-monthly-${stamp}.md`);
@@ -349,11 +407,12 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       historyFailedCount,
       auditPath,
       backtest,
-      monteCarlo
+      monteCarlo,
+      variants
     }),
     "utf8"
   );
-  return { jsonPath, markdownPath, auditPath, backtest, monteCarlo };
+  return { jsonPath, markdownPath, auditPath, backtest, monteCarlo, variants };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

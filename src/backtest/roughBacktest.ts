@@ -6,19 +6,26 @@ import {
 } from "../live/marketScreener";
 import { calculateAtr, calculateProfitProtectionStop, type ProfitProtectionStage } from "../domain/profitProtection";
 import type { RuleResult, SignalType } from "../domain/types";
+import type { TradeExecutionCostConfig } from "./tradeExecution";
 
 export type RoughGrade = "A" | "B";
 
-export interface RoughBacktestConfig {
+export interface RoughBacktestConfig extends TradeExecutionCostConfig {
   initialCapital: number;
   warmupDays: number;
   maxExposurePct: number;
   maxSinglePositionPct: number;
   maxTrialSinglePositionPct: number;
   maxTrialTotalPositionPct: number;
+  riskPerTradePct?: number;
+  trialRiskPerTradePct?: number;
+  maxPortfolioRiskPct?: number;
+  healthyTrendExposurePct?: number;
+  strongTrendExposurePct?: number;
   maxHoldings: number;
   minBuyAmount: number;
   lotSize: number;
+  allowedGrades?: RoughGrade[];
 }
 
 export interface RoughPositionSizingInput {
@@ -28,8 +35,10 @@ export interface RoughPositionSizingInput {
   cash: number;
   currentMarketValue: number;
   currentTrialMarketValue: number;
+  currentPortfolioRiskAmount?: number;
   config: RoughBacktestConfig;
   maxExposurePct?: number;
+  stopPrice?: number;
 }
 
 export interface RoughPositionSizing {
@@ -37,7 +46,16 @@ export interface RoughPositionSizing {
   quantity: number;
   amount: number;
   positionPct: number;
-  reason: "ok" | "no_price" | "no_cash" | "exposure_full" | "trial_budget_full" | "below_min_buy_amount" | "below_lot_size";
+  riskAmount?: number;
+  reason:
+    | "ok"
+    | "no_price"
+    | "no_cash"
+    | "exposure_full"
+    | "trial_budget_full"
+    | "portfolio_risk_full"
+    | "below_min_buy_amount"
+    | "below_lot_size";
 }
 
 export interface RoughUniverseItem {
@@ -67,6 +85,10 @@ export interface RoughTradeRecord {
   pnl?: number;
   returnPct?: number;
   positionPct?: number;
+  fees?: number;
+  slippageAmount?: number;
+  rawPrice?: number;
+  grossAmount?: number;
 }
 
 export interface RoughEquityPoint {
@@ -163,6 +185,11 @@ const DEFAULT_CONFIG: RoughBacktestConfig = {
   maxSinglePositionPct: 10,
   maxTrialSinglePositionPct: 3,
   maxTrialTotalPositionPct: 10,
+  riskPerTradePct: 1,
+  trialRiskPerTradePct: 0.3,
+  maxPortfolioRiskPct: 6,
+  healthyTrendExposurePct: 70,
+  strongTrendExposurePct: 90,
   maxHoldings: 8,
   minBuyAmount: 5_000,
   lotSize: 100
@@ -258,6 +285,10 @@ function trialMarketValue(holdings: Holding[], quoteFor: (symbol: string) => num
     .reduce((sum, holding) => sum + holding.quantity * (quoteFor(holding.symbol) ?? holding.avgCost), 0);
 }
 
+function portfolioRiskAmount(holdings: Holding[]): number {
+  return holdings.reduce((sum, holding) => sum + Math.max(0, holding.avgCost - holding.stopPrice) * holding.quantity, 0);
+}
+
 function stopReason(holding: Holding): string {
   return holding.stopPrice > holding.initialStopPrice ? "profit_protection_stop" : "stop_loss";
 }
@@ -293,7 +324,7 @@ function maxDrawdownFromAssets(values: number[]): number {
   return round(maxDrawdown);
 }
 
-function benchmarkMaxExposure(benchmark: DailyBar[], fallback: number): number {
+export function calculateBenchmarkExposureLimit(benchmark: DailyBar[], config: RoughBacktestConfig): number {
   if (benchmark.length < 120) return 0;
   const closes = benchmark.map((bar) => bar.close);
   const close = closes[closes.length - 1];
@@ -302,8 +333,17 @@ function benchmarkMaxExposure(benchmark: DailyBar[], fallback: number): number {
   const ma120 = mean(closes.slice(-120)) ?? close;
   const ma60Before = mean(closes.slice(-80, -20)) ?? ma60;
   if (close < ma120 * 0.98) return 0;
-  if (close >= ma20 && ma20 >= ma60 * 0.99 && ma60 >= ma120 * 0.98 && ma60 >= ma60Before * 0.99) return Math.max(fallback, 60);
-  return fallback;
+  if (close >= ma20 && ma20 >= ma60 && ma60 >= ma120 && close >= ma120 * 1.05 && ma60 >= ma60Before) {
+    return Math.max(config.maxExposurePct, config.strongTrendExposurePct ?? 90);
+  }
+  if (close >= ma60 && ma20 >= ma60 * 0.99 && ma60 >= ma120 * 0.98 && ma60 >= ma60Before * 0.99) {
+    return Math.max(config.maxExposurePct, config.healthyTrendExposurePct ?? 70);
+  }
+  return config.maxExposurePct;
+}
+
+function benchmarkMaxExposure(benchmark: DailyBar[], config: RoughBacktestConfig): number {
+  return calculateBenchmarkExposureLimit(benchmark, config);
 }
 
 export function calculateRoughPositionSize(input: RoughPositionSizingInput): RoughPositionSizing {
@@ -321,15 +361,37 @@ export function calculateRoughPositionSize(input: RoughPositionSizingInput): Rou
   if (remainingTrial <= 0) return { canBuy: false, quantity: 0, amount: 0, positionPct: 0, reason: "trial_budget_full" };
 
   const targetPct = input.grade === "B" ? input.config.maxTrialSinglePositionPct : input.config.maxSinglePositionPct;
-  const targetAmount = Math.min(input.totalAssets * (targetPct / 100), remainingExposure, remainingTrial, input.cash);
+  const stopRiskPct =
+    input.stopPrice !== undefined && input.stopPrice > 0 && input.price > input.stopPrice
+      ? (input.price - input.stopPrice) / input.price
+      : null;
+  const perTradeRiskPct = input.grade === "B" ? input.config.trialRiskPerTradePct ?? 0.3 : input.config.riskPerTradePct ?? 1;
+  const remainingPortfolioRisk =
+    stopRiskPct === null
+      ? Number.POSITIVE_INFINITY
+      : input.totalAssets * ((input.config.maxPortfolioRiskPct ?? 6) / 100) - (input.currentPortfolioRiskAmount ?? 0);
+  if (remainingPortfolioRisk <= 0) {
+    return { canBuy: false, quantity: 0, amount: 0, positionPct: 0, riskAmount: 0, reason: "portfolio_risk_full" };
+  }
+  const riskBasedAmount = stopRiskPct === null ? Number.POSITIVE_INFINITY : (input.totalAssets * (perTradeRiskPct / 100)) / stopRiskPct;
+  const portfolioRiskCappedAmount = stopRiskPct === null ? Number.POSITIVE_INFINITY : remainingPortfolioRisk / stopRiskPct;
+  const targetAmount = Math.min(
+    input.totalAssets * (targetPct / 100),
+    riskBasedAmount,
+    portfolioRiskCappedAmount,
+    remainingExposure,
+    remainingTrial,
+    input.cash
+  );
   const quantity = Math.floor(targetAmount / input.price / input.config.lotSize) * input.config.lotSize;
   const amount = round(quantity * input.price);
+  const riskAmount = stopRiskPct === null ? undefined : round(amount * stopRiskPct);
   const positionPct = input.totalAssets > 0 ? round((amount / input.totalAssets) * 100) : 0;
   if (amount < input.config.minBuyAmount) {
-    return { canBuy: false, quantity, amount, positionPct, reason: "below_min_buy_amount" };
+    return { canBuy: false, quantity, amount, positionPct, riskAmount, reason: "below_min_buy_amount" };
   }
-  if (quantity <= 0) return { canBuy: false, quantity: 0, amount: 0, positionPct: 0, reason: "below_lot_size" };
-  return { canBuy: true, quantity, amount, positionPct, reason: "ok" };
+  if (quantity <= 0) return { canBuy: false, quantity: 0, amount: 0, positionPct: 0, riskAmount, reason: "below_lot_size" };
+  return { canBuy: true, quantity, amount, positionPct, riskAmount, reason: "ok" };
 }
 
 export function runMonteCarloFromClosedTrades(
@@ -451,7 +513,7 @@ export function runRoughBacktest(input: {
 
     const currentMarketValue = marketValue(holdings, quoteFor);
     const totalAssetsBeforeBuys = round(cash + currentMarketValue);
-    const maxExposurePct = benchmarkMaxExposure(input.benchmarkBars.slice(0, benchmarkEndIndex + 1), config.maxExposurePct);
+    const maxExposurePct = benchmarkMaxExposure(input.benchmarkBars.slice(0, benchmarkEndIndex + 1), config);
     const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
     const candidates: Candidate[] = [];
 
@@ -480,6 +542,7 @@ export function runRoughBacktest(input: {
           const analysis = analyzeHistory(stockAtDate, history, { benchmarkBars: benchmarkHistory });
           const grade = candidateGrade(analysis.signalType, analysis.rules, current.close);
           if (!grade) continue;
+          if (config.allowedGrades && !config.allowedGrades.includes(grade)) continue;
           candidates.push({
             symbol: item.stock.symbol,
             name: item.stock.name,
@@ -514,8 +577,10 @@ export function runRoughBacktest(input: {
         cash,
         currentMarketValue: currentMv,
         currentTrialMarketValue: trialMarketValue(holdings, quote),
+        currentPortfolioRiskAmount: portfolioRiskAmount(holdings),
         maxExposurePct,
-        config
+        config,
+        stopPrice: candidate.stopPrice
       });
       if (!sizing.canBuy) continue;
       cash = round(cash - sizing.amount);

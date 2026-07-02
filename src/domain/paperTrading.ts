@@ -124,9 +124,12 @@ export interface PaperTradingPlanResult {
 }
 
 const INITIAL_CAPITAL = 200_000;
-const MAX_SINGLE_POSITION_PCT = 10;
+const MAX_SINGLE_POSITION_PCT = 12;
 const MAX_TRIAL_SINGLE_POSITION_PCT = 3;
 const MAX_TRIAL_TOTAL_POSITION_PCT = 10;
+const RISK_PER_TRADE_PCT = 1;
+const TRIAL_RISK_PER_TRADE_PCT = 0.3;
+const MAX_PORTFOLIO_RISK_PCT = 6;
 const MIN_BUY_AMOUNT = 5_000;
 
 function round(value: number, digits = 2): number {
@@ -447,6 +450,45 @@ function trialExposureAmount(summary: PaperAccountSummary): number {
     .reduce((sum, holding) => sum + holding.marketValue, 0);
 }
 
+function holdingRiskAmount(holding: Pick<PaperHolding, "quantity" | "avgCost" | "stopPrice">): number {
+  if (!Number.isFinite(holding.stopPrice) || holding.stopPrice <= 0 || holding.stopPrice >= holding.avgCost) return 0;
+  return Math.max(0, holding.avgCost - holding.stopPrice) * holding.quantity;
+}
+
+function portfolioRiskAmount(account: PaperAccount): number {
+  return account.holdings.reduce((sum, holding) => sum + holdingRiskAmount(holding), 0);
+}
+
+function riskSizedTargetAmount(input: {
+  grade: "A" | "B";
+  price: number;
+  stopPrice: number;
+  totalAssets: number;
+  targetPct: number;
+  remainingExposureAmount: number;
+  remainingTrialAmount: number;
+  cash: number;
+  currentPortfolioRiskAmount: number;
+}): number {
+  const fixedCapAmount = (input.totalAssets * input.targetPct) / 100;
+  const stopRiskPct =
+    input.stopPrice > 0 && input.stopPrice < input.price ? ((input.price - input.stopPrice) / input.price) * 100 : null;
+  const riskBudgetPct = input.grade === "B" ? TRIAL_RISK_PER_TRADE_PCT : RISK_PER_TRADE_PCT;
+  const riskCapAmount = stopRiskPct && stopRiskPct > 0 ? (input.totalAssets * riskBudgetPct) / 100 / (stopRiskPct / 100) : fixedCapAmount;
+  const portfolioRiskRemaining = Math.max(0, (input.totalAssets * MAX_PORTFOLIO_RISK_PCT) / 100 - input.currentPortfolioRiskAmount);
+  const portfolioRiskCapAmount =
+    stopRiskPct && stopRiskPct > 0 ? portfolioRiskRemaining / (stopRiskPct / 100) : Number.POSITIVE_INFINITY;
+
+  return Math.min(
+    fixedCapAmount,
+    riskCapAmount,
+    portfolioRiskCapAmount,
+    input.remainingExposureAmount,
+    input.grade === "B" ? input.remainingTrialAmount : Number.POSITIVE_INFINITY,
+    input.cash
+  );
+}
+
 function candidateGrade(candidate: PaperCandidate): "A" | "B" | null {
   if (isQualifiedCandidate(candidate)) return "A";
   if (isTrialCandidate(candidate)) return "B";
@@ -551,12 +593,17 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
         grade === "B"
           ? Math.min(MAX_TRIAL_SINGLE_POSITION_PCT, targetBand.max)
           : Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
-      const targetAmount = Math.min(
-        (summary.totalAssets * targetPct) / 100,
+      const targetAmount = riskSizedTargetAmount({
+        grade,
+        price: item.price,
+        stopPrice: item.stopPrice,
+        totalAssets: summary.totalAssets,
+        targetPct,
         remainingExposureAmount,
-        grade === "B" ? remainingTrialAmount : Number.POSITIVE_INFINITY,
-        nextAccount.cash
-      );
+        remainingTrialAmount,
+        cash: nextAccount.cash,
+        currentPortfolioRiskAmount: portfolioRiskAmount(nextAccount)
+      });
       if (targetAmount < MIN_BUY_AMOUNT) {
         decisions.push(`${item.symbol} 计划金额低于最小买入额，跳过`);
         continue;
@@ -609,7 +656,17 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
       grade === "B"
         ? Math.min(MAX_TRIAL_SINGLE_POSITION_PCT, targetBand.max)
         : Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
-    const targetAmount = Math.min((summary.totalAssets * targetPct) / 100, nextAccount.cash);
+    const targetAmount = riskSizedTargetAmount({
+      grade,
+      price: item.price,
+      stopPrice: item.stopPrice,
+      totalAssets: summary.totalAssets,
+      targetPct,
+      remainingExposureAmount: Math.max(0, (summary.totalAssets * targetBand.max) / 100 - summary.marketValue),
+      remainingTrialAmount: Math.max(0, (summary.totalAssets * MAX_TRIAL_TOTAL_POSITION_PCT) / 100 - trialExposureAmount(summary)),
+      cash: nextAccount.cash,
+      currentPortfolioRiskAmount: portfolioRiskAmount(nextAccount)
+    });
     const reason =
       existingSymbols.has(symbol)
         ? "已持仓"

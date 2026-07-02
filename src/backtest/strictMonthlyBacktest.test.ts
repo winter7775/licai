@@ -99,6 +99,51 @@ function protectionBars(symbol: string): { stock: SpotStock; history: DailyBar[]
   return { stock: stock(symbol), history };
 }
 
+function limitUpOpenBars(symbol: string): { stock: SpotStock; history: DailyBar[] } {
+  const first = Date.UTC(2020, 0, 1);
+  let previousClose = 10;
+  const history = Array.from({ length: 135 }, (_, index) => {
+    const currentDate = new Date(first + index * 86_400_000);
+    const date = currentDate.toISOString().slice(0, 10);
+    const isLimitUpOpen = index === 130;
+    const open = isLimitUpOpen ? previousClose * 1.1 : previousClose * 1.005;
+    const close = open;
+    const high = isLimitUpOpen ? open : open * 1.01;
+    const low = isLimitUpOpen ? open : open * 0.99;
+    const changeAmount = close - previousClose;
+    previousClose = close;
+    return {
+      date,
+      open,
+      close,
+      high,
+      low,
+      volume: 1_000_000,
+      amount: 200_000_000,
+      amplitudePct: isLimitUpOpen ? 0 : 2,
+      changePct: 0,
+      changeAmount,
+      turnoverRate: 1
+    };
+  });
+  return { stock: stock(symbol), history };
+}
+
+function passingRules(): HistoryAnalysis["rules"] {
+  return [
+    { id: "liquidity.prefilter", name: "liquidity", actual: 1, threshold: "ok", passed: true, severity: "hard", explanation: "" },
+    { id: "trend.template", name: "trend", actual: "ok", threshold: "ok", passed: true, severity: "hard", explanation: "" },
+    { id: "quality.valuation", name: "valuation", actual: 20, threshold: "ok", passed: true, severity: "hard", explanation: "" },
+    { id: "relative_strength", name: "rs", actual: "ok", threshold: "ok", passed: true, severity: "hard", explanation: "" },
+    { id: "risk.stop_loss_width", name: "risk", actual: 6, threshold: "<=7", passed: true, severity: "hard", explanation: "" },
+    { id: "base.range", name: "range", actual: 6, threshold: "<=35", passed: true, severity: "hard", explanation: "" },
+    { id: "base.volume_contraction", name: "volume", actual: 1, threshold: "<=1.05", passed: true, severity: "soft", explanation: "" },
+    { id: "base.atr_contraction", name: "atr", actual: 1, threshold: "<=1.1", passed: true, severity: "soft", explanation: "" },
+    { id: "base.volatility_contraction", name: "vol", actual: 1, threshold: "<=1.05", passed: true, severity: "soft", explanation: "" },
+    { id: "buy.breakout", name: "breakout", actual: "ok", threshold: "ok", passed: true, severity: "hard", explanation: "" }
+  ];
+}
+
 describe("strict monthly universe snapshots", () => {
   it("uses the prior month-end data to select the next month's pool", () => {
     const highInJanuary = {
@@ -327,8 +372,99 @@ describe("strict monthly backtest replay", () => {
     });
 
     const sell = result.trades.find((trade) => trade.side === "sell");
-    expect(sell?.price).toBe(102.77);
+    expect(sell?.price).toBe(100);
     expect(sell?.reason).toBe("profit_protection_stop");
     expect(result.closedTrades[0]?.exitReason).toBe("profit_protection_stop");
+  });
+
+  it("records transaction fees and slippage on buys when realistic execution costs are enabled", () => {
+    const item = risingBars("000001");
+    const analyze = (_currentStock: SpotStock, bars: DailyBar[]): HistoryAnalysis => {
+      const current = bars[bars.length - 1];
+      return {
+        signalType: bars.length === 130 ? "breakout" : "watch",
+        pivotPrice: current.close,
+        baseLow: current.close * 0.94,
+        baseRangePct: 6,
+        stopPrice: current.close * 0.94,
+        stopLossWidthPct: 6,
+        buyExtensionPct: 0,
+        ma20: current.close,
+        ma60: current.close,
+        ma120: current.close,
+        rules: passingRules()
+      };
+    };
+
+    const result = runStrictMonthlyBacktest({
+      universe: [item],
+      benchmarkBars: item.history.map((daily) => ({ ...daily })),
+      monthlySnapshots: [{ activeMonth: "2020-05", asOfDate: "2020-04-30", symbols: ["000001"], rankMetric: "trailing_amount" }],
+      config: {
+        initialCapital: 200_000,
+        warmupDays: 120,
+        monthlyPoolSize: 1,
+        monthlyPoolLookbackDays: 20,
+        maxExposurePct: 35,
+        maxSinglePositionPct: 10,
+        maxTrialSinglePositionPct: 3,
+        maxTrialTotalPositionPct: 10,
+        maxHoldings: 8,
+        minBuyAmount: 1_000,
+        lotSize: 100,
+        slippagePct: 0.1,
+        commissionPct: 0.025,
+        transferFeePct: 0.001,
+        stampDutyPct: 0.05
+      },
+      analyze
+    });
+
+    const firstBuy = result.trades.find((trade) => trade.side === "buy");
+    expect(firstBuy?.price).toBeGreaterThan(item.history[130].open);
+    expect(firstBuy?.fees).toBeGreaterThan(0);
+    expect(firstBuy?.slippageAmount).toBeGreaterThan(0);
+  });
+
+  it("does not buy when the next trading day opens locked at the limit-up price", () => {
+    const item = limitUpOpenBars("000001");
+    const analyze = (_currentStock: SpotStock, bars: DailyBar[]): HistoryAnalysis => {
+      const current = bars[bars.length - 1];
+      return {
+        signalType: bars.length === 130 ? "breakout" : "watch",
+        pivotPrice: current.close,
+        baseLow: current.close * 0.94,
+        baseRangePct: 6,
+        stopPrice: current.close * 0.94,
+        stopLossWidthPct: 6,
+        buyExtensionPct: 0,
+        ma20: current.close,
+        ma60: current.close,
+        ma120: current.close,
+        rules: passingRules()
+      };
+    };
+
+    const result = runStrictMonthlyBacktest({
+      universe: [item],
+      benchmarkBars: item.history.map((daily) => ({ ...daily })),
+      monthlySnapshots: [{ activeMonth: "2020-05", asOfDate: "2020-04-30", symbols: ["000001"], rankMetric: "trailing_amount" }],
+      config: {
+        initialCapital: 200_000,
+        warmupDays: 120,
+        monthlyPoolSize: 1,
+        monthlyPoolLookbackDays: 20,
+        maxExposurePct: 35,
+        maxSinglePositionPct: 10,
+        maxTrialSinglePositionPct: 3,
+        maxTrialTotalPositionPct: 10,
+        maxHoldings: 8,
+        minBuyAmount: 1_000,
+        lotSize: 100
+      },
+      analyze
+    });
+
+    expect(result.trades.filter((trade) => trade.side === "buy")).toHaveLength(0);
   });
 });

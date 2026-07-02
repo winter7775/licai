@@ -313,7 +313,7 @@ describe("paper trading auto plan", () => {
       symbol: "600777",
       grade: "B",
       action: "skip",
-      reason: "不足一手"
+      reason: "计划金额低于5000"
     });
   });
 
@@ -383,6 +383,22 @@ describe("paper trading auto plan", () => {
 
     expect(result.trades.length).toBeGreaterThan(0);
     expect(summary.exposurePct).toBeLessThanOrEqual(10);
+  });
+
+  it("sizes A-grade simulated buys from the stop distance instead of a fixed percentage", () => {
+    const result = generatePaperTradingPlan({
+      account: createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      candidates: [candidate({ price: 20, stopPrice: 16, suggestedPositionPct: 12 })],
+      position: normalPosition,
+      tradedAt: "2026-06-09T15:10:00.000Z"
+    });
+
+    expect(result.trades[0]).toMatchObject({
+      side: "buy",
+      symbol: "600879",
+      quantity: 500,
+      amount: 10_000
+    });
   });
 
   it("sells holdings that hit stop loss or take profit before considering new buys", () => {
