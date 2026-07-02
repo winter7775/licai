@@ -46,6 +46,12 @@ describe("paper trading store", () => {
 
     const db = await readPaperTradingDb(filePath);
     expect(db.holdings).toHaveLength(1);
+    expect(db.holdings[0]).toMatchObject({
+      initialStopPrice: 18.8,
+      highestPriceSinceEntry: 20,
+      profitProtectionStage: "initial",
+      protectedProfitPct: 0
+    });
     expect(db.trades).toHaveLength(1);
     expect(db.cash).toBe(180000);
   });

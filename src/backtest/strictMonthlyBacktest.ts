@@ -1,4 +1,5 @@
 import { analysisScore, analyzeHistory, type DailyBar, type HistoryAnalysis, type SpotStock } from "../live/marketScreener";
+import { calculateAtr, calculateProfitProtectionStop, type ProfitProtectionStage } from "../domain/profitProtection";
 import type { RuleResult, SignalType } from "../domain/types";
 import {
   calculateRoughPositionSize,
@@ -96,7 +97,13 @@ interface Holding {
   name: string;
   quantity: number;
   avgCost: number;
+  initialStopPrice: number;
   stopPrice: number;
+  profitStopPrice?: number;
+  atrStopPrice?: number;
+  highestPriceSinceEntry: number;
+  profitProtectionStage?: ProfitProtectionStage;
+  protectedProfitPct?: number;
   takeProfitPrice: number;
   grade: RoughGrade;
   entryDate: string;
@@ -290,6 +297,31 @@ function trialMarketValue(holdings: Holding[], quoteFor: (symbol: string) => num
     .reduce((sum, holding) => sum + holding.quantity * (quoteFor(holding.symbol) ?? holding.avgCost), 0);
 }
 
+function stopReason(holding: Holding): string {
+  return holding.stopPrice > holding.initialStopPrice ? "profit_protection_stop" : "stop_loss";
+}
+
+function refreshHoldingRisk(holding: Holding, history: DailyBar[], currentBar: DailyBar): Holding {
+  const highestPrice = Math.max(holding.highestPriceSinceEntry, currentBar.high);
+  const atr = history.length >= 2 ? calculateAtr(history, 22) : undefined;
+  const protection = calculateProfitProtectionStop({
+    entryPrice: holding.avgCost,
+    initialStopPrice: holding.initialStopPrice,
+    currentStopPrice: holding.stopPrice,
+    highestPrice,
+    atr
+  });
+  return {
+    ...holding,
+    stopPrice: protection.effectiveStopPrice,
+    profitStopPrice: protection.profitStopPrice,
+    atrStopPrice: protection.atrStopPrice,
+    highestPriceSinceEntry: protection.highestPrice,
+    profitProtectionStage: protection.stage,
+    protectedProfitPct: protection.protectedProfitPct
+  };
+}
+
 function summarizeRules(rules: RuleResult[]): Pick<StrictAuditRecord, "failedHardRules" | "failedRules" | "passedRules"> {
   return {
     failedHardRules: rules.filter((rule) => rule.severity === "hard" && !rule.passed).map((rule) => rule.id),
@@ -362,6 +394,7 @@ export function runStrictMonthlyBacktest(input: {
       lookbackDays: config.monthlyPoolLookbackDays
     });
   const snapshotByMonth = new Map(monthlySnapshots.map((snapshot) => [snapshot.activeMonth, snapshot]));
+  const historyBySymbol = new Map(input.universe.map((item) => [item.stock.symbol, item.history]));
   const barMaps = new Map(input.universe.map((item) => [item.stock.symbol, barByDate(item.history)]));
   const indexMaps = new Map(input.universe.map((item) => [item.stock.symbol, historyIndexByDate(item.history)]));
   const stockBySymbol = new Map(input.universe.map((item) => [item.stock.symbol, item.stock]));
@@ -415,7 +448,11 @@ export function runStrictMonthlyBacktest(input: {
         name: order.name,
         quantity: sizing.quantity,
         avgCost: round(executionBar.open),
+        initialStopPrice: order.stopPrice,
         stopPrice: order.stopPrice,
+        highestPriceSinceEntry: round(executionBar.open),
+        profitProtectionStage: "initial",
+        protectedProfitPct: 0,
         takeProfitPrice: round(executionBar.open * 1.4),
         grade: order.grade,
         entryDate: date,
@@ -447,7 +484,9 @@ export function runStrictMonthlyBacktest(input: {
       const stopHit = bar.low <= holding.stopPrice;
       const takeProfitHit = bar.high >= holding.takeProfitPrice;
       if (!stopHit && !takeProfitHit) {
-        nextHoldings.push(holding);
+        const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+        const history = itemIndex === undefined ? [bar] : (historyBySymbol.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
+        nextHoldings.push(refreshHoldingRisk(holding, history, bar));
         continue;
       }
       const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
@@ -455,7 +494,7 @@ export function runStrictMonthlyBacktest(input: {
       const pnl = round((exitPrice - holding.avgCost) * holding.quantity);
       const returnPct = round(((exitPrice / holding.avgCost) - 1) * 100);
       cash = round(cash + amount);
-      const exitReason = stopHit ? "stop_loss" : "take_profit";
+      const exitReason = stopHit ? stopReason(holding) : "take_profit";
       trades.push({
         symbol: holding.symbol,
         name: holding.name,
@@ -751,7 +790,11 @@ export async function runStrictMonthlyBacktestLazy(input: {
         name: order.name,
         quantity: sizing.quantity,
         avgCost: round(executionBar.open),
+        initialStopPrice: order.stopPrice,
         stopPrice: order.stopPrice,
+        highestPriceSinceEntry: round(executionBar.open),
+        profitProtectionStage: "initial",
+        protectedProfitPct: 0,
         takeProfitPrice: round(executionBar.open * 1.4),
         grade: order.grade,
         entryDate: date,
@@ -783,7 +826,9 @@ export async function runStrictMonthlyBacktestLazy(input: {
       const stopHit = bar.low <= holding.stopPrice;
       const takeProfitHit = bar.high >= holding.takeProfitPrice;
       if (!stopHit && !takeProfitHit) {
-        nextHoldings.push(holding);
+        const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+        const history = itemIndex === undefined ? [bar] : (histories.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
+        nextHoldings.push(refreshHoldingRisk(holding, history, bar));
         continue;
       }
       const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
@@ -791,7 +836,7 @@ export async function runStrictMonthlyBacktestLazy(input: {
       const pnl = round((exitPrice - holding.avgCost) * holding.quantity);
       const returnPct = round(((exitPrice / holding.avgCost) - 1) * 100);
       cash = round(cash + amount);
-      const exitReason = stopHit ? "stop_loss" : "take_profit";
+      const exitReason = stopHit ? stopReason(holding) : "take_profit";
       trades.push({
         symbol: holding.symbol,
         name: holding.name,

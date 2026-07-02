@@ -2,6 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInitialPaperAccount, type PaperAccount } from "../src/domain/paperTrading";
 
+function optionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function normalizePaperAccount(input: Partial<PaperAccount>): PaperAccount {
   const fallback = createInitialPaperAccount();
   return {
@@ -14,7 +20,13 @@ function normalizePaperAccount(input: Partial<PaperAccount>): PaperAccount {
           industry: String(holding.industry ?? "未分类"),
           quantity: Number(holding.quantity) || 0,
           avgCost: Number(holding.avgCost) || 0,
+          initialStopPrice: optionalNumber(holding.initialStopPrice),
           stopPrice: Number(holding.stopPrice) || 0,
+          profitStopPrice: optionalNumber(holding.profitStopPrice),
+          atrStopPrice: optionalNumber(holding.atrStopPrice),
+          highestPriceSinceEntry: optionalNumber(holding.highestPriceSinceEntry),
+          profitProtectionStage: holding.profitProtectionStage,
+          protectedProfitPct: optionalNumber(holding.protectedProfitPct),
           takeProfitPrice: Number(holding.takeProfitPrice) || 0,
           openedAt: String(holding.openedAt ?? fallback.updatedAt),
           updatedAt: String(holding.updatedAt ?? fallback.updatedAt),

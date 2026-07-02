@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { fillMissingPaperQuotePrices, handleApiRequest, hasPaperReviewForDate, shouldSkipPaperTradingReview } from "./apiHandlers";
+import {
+  fetchPaperHoldingBars,
+  fillMissingPaperQuotePrices,
+  handleApiRequest,
+  hasPaperReviewForDate,
+  paperQuotesFromSummary,
+  shouldSkipPaperTradingReview
+} from "./apiHandlers";
 
 function createMockResponse() {
   return {
@@ -84,6 +91,30 @@ describe("shared api handlers", () => {
     expect(result.previousCloses).toEqual({ "002179": 42.73 });
     expect(result.filledSymbols).toEqual(["002179"]);
     expect(result.missingSymbols).toEqual([]);
+  });
+
+  it("builds paper holding quote and risk inputs for auto trading", async () => {
+    expect(
+      paperQuotesFromSummary({
+        holdings: [
+          { symbol: "600001", currentPrice: 11 },
+          { symbol: "600002", currentPrice: 20 }
+        ]
+      } as any)
+    ).toEqual({ "600001": 11, "600002": 20 });
+
+    const bars = await fetchPaperHoldingBars(["600001", "600002"], async (symbol) => {
+      if (symbol === "600001") {
+        return [
+          { date: "2026-06-23", high: 11.2, low: 10.2, close: 11 },
+          { date: "2026-06-24", high: 11.8, low: 10.9, close: 11.6 }
+        ] as any;
+      }
+      throw new Error("network");
+    });
+
+    expect(bars["600001"]).toHaveLength(2);
+    expect(bars["600002"]).toBeUndefined();
   });
 
   it("allows a same-day paper review to run again when the completed scan was refreshed later", () => {

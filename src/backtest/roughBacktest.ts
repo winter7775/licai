@@ -4,6 +4,7 @@ import {
   type DailyBar,
   type SpotStock
 } from "../live/marketScreener";
+import { calculateAtr, calculateProfitProtectionStop, type ProfitProtectionStage } from "../domain/profitProtection";
 import type { RuleResult, SignalType } from "../domain/types";
 
 export type RoughGrade = "A" | "B";
@@ -126,7 +127,13 @@ interface Holding {
   name: string;
   quantity: number;
   avgCost: number;
+  initialStopPrice: number;
   stopPrice: number;
+  profitStopPrice?: number;
+  atrStopPrice?: number;
+  highestPriceSinceEntry: number;
+  profitProtectionStage?: ProfitProtectionStage;
+  protectedProfitPct?: number;
   takeProfitPrice: number;
   grade: RoughGrade;
   entryDate: string;
@@ -251,6 +258,31 @@ function trialMarketValue(holdings: Holding[], quoteFor: (symbol: string) => num
     .reduce((sum, holding) => sum + holding.quantity * (quoteFor(holding.symbol) ?? holding.avgCost), 0);
 }
 
+function stopReason(holding: Holding): string {
+  return holding.stopPrice > holding.initialStopPrice ? "profit_protection_stop" : "stop_loss";
+}
+
+function refreshHoldingRisk(holding: Holding, history: DailyBar[], currentBar: DailyBar): Holding {
+  const highestPrice = Math.max(holding.highestPriceSinceEntry, currentBar.high);
+  const atr = history.length >= 2 ? calculateAtr(history, 22) : undefined;
+  const protection = calculateProfitProtectionStop({
+    entryPrice: holding.avgCost,
+    initialStopPrice: holding.initialStopPrice,
+    currentStopPrice: holding.stopPrice,
+    highestPrice,
+    atr
+  });
+  return {
+    ...holding,
+    stopPrice: protection.effectiveStopPrice,
+    profitStopPrice: protection.profitStopPrice,
+    atrStopPrice: protection.atrStopPrice,
+    highestPriceSinceEntry: protection.highestPrice,
+    profitProtectionStage: protection.stage,
+    protectedProfitPct: protection.protectedProfitPct
+  };
+}
+
 function maxDrawdownFromAssets(values: number[]): number {
   let peak = values[0] ?? 0;
   let maxDrawdown = 0;
@@ -356,6 +388,7 @@ export function runRoughBacktest(input: {
   const startedAt = input.startedAt ?? benchmarkDates[Math.min(config.warmupDays, benchmarkDates.length - 1)] ?? "";
   const endedAt = input.endedAt ?? benchmarkDates[benchmarkDates.length - 1] ?? "";
   const selectedDates = benchmarkDates.filter((date) => date >= startedAt && date <= endedAt);
+  const historyBySymbol = new Map(input.universe.map((item) => [item.stock.symbol, item.history]));
   const barMaps = new Map(input.universe.map((item) => [item.stock.symbol, barByDate(item.history)]));
   const indexMaps = new Map(input.universe.map((item) => [item.stock.symbol, historyIndexByDate(item.history)]));
   const benchmarkIndex = historyIndexByDate(input.benchmarkBars);
@@ -381,7 +414,9 @@ export function runRoughBacktest(input: {
       const stopHit = bar.low <= holding.stopPrice;
       const takeProfitHit = bar.high >= holding.takeProfitPrice;
       if (!stopHit && !takeProfitHit) {
-        nextHoldings.push(holding);
+        const itemIndex = indexMaps.get(holding.symbol)?.get(date);
+        const history = itemIndex === undefined ? [bar] : (historyBySymbol.get(holding.symbol)?.slice(0, itemIndex + 1) ?? [bar]);
+        nextHoldings.push(refreshHoldingRisk(holding, history, bar));
         continue;
       }
       const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
@@ -398,7 +433,7 @@ export function runRoughBacktest(input: {
         quantity: holding.quantity,
         amount,
         grade: holding.grade,
-        reason: stopHit ? "stop_loss" : "take_profit",
+        reason: stopHit ? stopReason(holding) : "take_profit",
         pnl,
         returnPct,
         positionPct: holding.entryPositionPct
@@ -489,7 +524,11 @@ export function runRoughBacktest(input: {
         name: candidate.name,
         quantity: sizing.quantity,
         avgCost: round(candidate.price),
+        initialStopPrice: candidate.stopPrice,
         stopPrice: candidate.stopPrice,
+        highestPriceSinceEntry: round(candidate.price),
+        profitProtectionStage: "initial",
+        protectedProfitPct: 0,
         takeProfitPrice: candidate.takeProfitPrice,
         grade: candidate.grade,
         entryDate: date,

@@ -28,7 +28,11 @@ function paperTradingFixture(): PaperTradingResponseDto {
           industry: "银行",
           quantity: 1000,
           avgCost: 10,
+          initialStopPrice: 9.3,
           stopPrice: 9.3,
+          highestPriceSinceEntry: 11,
+          profitProtectionStage: "initial",
+          protectedProfitPct: -7,
           takeProfitPrice: 14,
           openedAt: "2026-06-25T07:10:00.000Z",
           updatedAt: "2026-06-25T07:10:00.000Z",
@@ -92,7 +96,11 @@ function paperTradingFixture(): PaperTradingResponseDto {
           todayPnl: 500,
           todayPnlPct: 4.76,
           weightPct: 5.64,
+          initialStopPrice: 9.3,
           stopPrice: 9.3,
+          highestPriceSinceEntry: 11,
+          profitProtectionStage: "initial",
+          protectedProfitPct: -7,
           takeProfitPrice: 14,
           openedAt: "2026-06-25T07:10:00.000Z",
           updatedAt: "2026-06-25T07:10:00.000Z",
@@ -262,6 +270,7 @@ describe("PaperTradingPage", () => {
 
     expect(await screen.findByTestId("paper-holding-detail-600001")).toBeTruthy();
     await waitFor(() => expect(screen.getByTestId("mini-kline-600001")).toBeTruthy());
+    expect(screen.getByTestId("paper-holding-detail-600001").textContent).toContain("保护阶段");
     expect(screen.getByTestId("paper-holding-trades-600001").textContent).toContain("A级买入");
   });
 });

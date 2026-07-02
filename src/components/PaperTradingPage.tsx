@@ -21,6 +21,14 @@ function pct(value: number | undefined): string {
   return value === undefined ? "--" : `${value.toFixed(2)}%`;
 }
 
+function protectionStageText(stage: PaperHoldingSummary["profitProtectionStage"]): string {
+  if (stage === "breakeven") return "保本";
+  if (stage === "protect30") return "保护30%利润";
+  if (stage === "protect45") return "保护45%利润";
+  if (stage === "protect60") return "保护60%利润";
+  return "初始止损";
+}
+
 function count(value: number | undefined): string {
   return value === undefined ? "--" : value.toLocaleString("zh-CN");
 }
@@ -230,6 +238,28 @@ function HoldingDetail({ holding, bars, trades }: { holding: PaperHoldingSummary
               <strong className={realizedPnl >= 0 ? "gain" : "loss"}>{money(realizedPnl)}</strong>
             </div>
             <div>
+              <span>保护阶段</span>
+              <strong>{protectionStageText(holding.profitProtectionStage)}</strong>
+            </div>
+            <div>
+              <span>最高价 / 保护收益</span>
+              <strong>
+                {money(holding.highestPriceSinceEntry)} / {pct(holding.protectedProfitPct)}
+              </strong>
+            </div>
+            <div>
+              <span>初始 / 有效止损</span>
+              <strong>
+                {money(holding.initialStopPrice ?? holding.stopPrice)} / {money(holding.stopPrice)}
+              </strong>
+            </div>
+            <div>
+              <span>利润线 / ATR线</span>
+              <strong>
+                {money(holding.profitStopPrice)} / {money(holding.atrStopPrice)}
+              </strong>
+            </div>
+            <div>
               <span>买入理由</span>
               <strong>{holding.reason}</strong>
             </div>
@@ -283,6 +313,28 @@ function HoldingDetailV2({ holding, bars, trades }: { holding: PaperHoldingSumma
             <div>
               <span>已实现盈亏</span>
               <strong className={realizedPnl >= 0 ? "gain" : "loss"}>{money(realizedPnl)}</strong>
+            </div>
+            <div>
+              <span>保护阶段</span>
+              <strong>{protectionStageText(holding.profitProtectionStage)}</strong>
+            </div>
+            <div>
+              <span>最高价 / 保护收益</span>
+              <strong>
+                {money(holding.highestPriceSinceEntry)} / {pct(holding.protectedProfitPct)}
+              </strong>
+            </div>
+            <div>
+              <span>初始 / 有效止损</span>
+              <strong>
+                {money(holding.initialStopPrice ?? holding.stopPrice)} / {money(holding.stopPrice)}
+              </strong>
+            </div>
+            <div>
+              <span>利润线 / ATR线</span>
+              <strong>
+                {money(holding.profitStopPrice)} / {money(holding.atrStopPrice)}
+              </strong>
             </div>
             <div>
               <span>买入理由</span>
@@ -620,7 +672,13 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                       </td>
                       <td>{pct(holding.weightPct)}</td>
                       <td>
-                        {holding.stopPrice} / {holding.takeProfitPrice}
+                        <div className="risk-stack">
+                          <strong>有效 {money(holding.stopPrice)}</strong>
+                          <small>初始 {money(holding.initialStopPrice ?? holding.stopPrice)} / 止盈 {money(holding.takeProfitPrice)}</small>
+                          <small>
+                            {protectionStageText(holding.profitProtectionStage)} · 最高 {money(holding.highestPriceSinceEntry)}
+                          </small>
+                        </div>
                       </td>
                     </tr>
                     {expandedHolding === holding.symbol ? (

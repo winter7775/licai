@@ -3,8 +3,10 @@ import {
   generatePaperTradingPlan,
   summarizePaperAccount,
   type PaperAccount,
+  type PaperAccountSummary,
   type PaperCandidate
 } from "../src/domain/paperTrading";
+import type { ProtectionPriceBar } from "../src/domain/profitProtection";
 import type { PaperAttributionCandidate } from "../src/domain/paperAttribution";
 import { calculatePortfolioSummary, upsertHolding, type HoldingQuote, type PortfolioHolding, type PortfolioState } from "../src/domain/portfolio";
 import {
@@ -232,6 +234,33 @@ export async function fillMissingPaperQuotePrices(
   return { quotes: nextQuotes, previousCloses: nextPreviousCloses, filledSymbols, missingSymbols };
 }
 
+export function paperQuotesFromSummary(summary: Pick<PaperAccountSummary, "holdings">): Record<string, number> {
+  return Object.fromEntries(
+    summary.holdings
+      .filter((holding) => holding.currentPrice > 0)
+      .map((holding) => [holding.symbol.padStart(6, "0").slice(-6), holding.currentPrice])
+  );
+}
+
+export async function fetchPaperHoldingBars(
+  symbols: string[],
+  historyProvider: typeof fetchStockHistory = fetchStockHistory
+): Promise<Record<string, ProtectionPriceBar[]>> {
+  const barsBySymbol: Record<string, ProtectionPriceBar[]> = {};
+  for (const symbol of Array.from(new Set(symbols.map((item) => item.padStart(6, "0").slice(-6))))) {
+    try {
+      const history = await historyProvider(symbol, 40);
+      const bars = history
+        .filter((bar) => bar.high > 0 && bar.low > 0 && bar.close > 0)
+        .map((bar) => ({ high: bar.high, low: bar.low, close: bar.close }));
+      if (bars.length > 0) barsBySymbol[symbol] = bars;
+    } catch {
+      // Quote fallback can still run without ATR; keep a single-symbol failure from blocking the daily job.
+    }
+  }
+  return barsBySymbol;
+}
+
 export function paperCandidateFromLiveStock(item: LiveScreenedStock): PaperCandidate {
   const hardRulesPassed = !item.analysis.rules.some((rule) => rule.severity === "hard" && !rule.passed);
   return {
@@ -407,9 +436,12 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
     scanState.candidates.length > 0
       ? scanState.candidates.map((item) => paperCandidateFromAttributionCandidate(item))
       : (scan?.candidates ?? []).map((item) => paperCandidateFromLiveStock(item));
+  const holdingSymbols = account.holdings.map((holding) => holding.symbol);
   const plan = generatePaperTradingPlan({
     account,
     candidates,
+    quotes: paperQuotesFromSummary(beforeResponse.summary),
+    holdingBars: await fetchPaperHoldingBars(holdingSymbols),
     position: position.status,
     tradedAt: new Date().toISOString()
   });

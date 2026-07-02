@@ -5,6 +5,7 @@ import {
   createInitialPaperAccount,
   generatePaperTradingPlan,
   summarizePaperAccount,
+  type PaperAccount,
   type PaperCandidate
 } from "./paperTrading";
 
@@ -184,6 +185,26 @@ describe("paper trading account", () => {
     expect(sold.holdings[0].avgCost).toBe(20);
     expect(sold.trades).toHaveLength(2);
     expect(sold.trades[1]).toMatchObject({ side: "sell", quantity: 400, amount: 8800, realizedPnl: 800, realizedPnlPct: 10 });
+  });
+
+  it("records the initial stop and highest price when buying", () => {
+    const account = applyPaperTrade(createInitialPaperAccount("2026-06-09T09:30:00.000Z"), {
+      side: "buy",
+      symbol: "600879",
+      name: "test stock",
+      industry: "test",
+      quantity: 100,
+      price: 100,
+      stopPrice: 94,
+      takeProfitPrice: 140,
+      reason: "entry",
+      tradedAt: "2026-06-09T10:00:00.000Z"
+    });
+
+    expect(account.holdings[0]).toMatchObject({
+      initialStopPrice: 94,
+      highestPriceSinceEntry: 100
+    });
   });
 });
 
@@ -386,6 +407,81 @@ describe("paper trading auto plan", () => {
     });
 
     expect(result.trades[0]).toMatchObject({ side: "sell", symbol: "600879", quantity: 1000, price: 28.5 });
+    expect(result.account.holdings).toEqual([]);
+  });
+
+  it("raises the stop to breakeven after one and a half R of profit", () => {
+    const account = applyPaperTrade(createInitialPaperAccount("2026-06-09T09:30:00.000Z"), {
+      side: "buy",
+      symbol: "600879",
+      name: "test stock",
+      industry: "test",
+      quantity: 100,
+      price: 100,
+      stopPrice: 94,
+      takeProfitPrice: 140,
+      reason: "entry",
+      tradedAt: "2026-06-09T10:00:00.000Z"
+    });
+
+    const result = generatePaperTradingPlan({
+      account,
+      candidates: [],
+      quotes: { "600879": 110 },
+      position: normalPosition,
+      tradedAt: "2026-06-10T15:10:00.000Z"
+    });
+
+    expect(result.trades).toEqual([]);
+    expect(result.account.holdings[0]).toMatchObject({
+      stopPrice: 100,
+      profitStopPrice: 100,
+      highestPriceSinceEntry: 110,
+      profitProtectionStage: "breakeven"
+    });
+  });
+
+  it("sells holdings when the current price falls through a raised profit protection stop", () => {
+    const account: PaperAccount = {
+      ...createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      cash: 190000,
+      holdings: [
+        {
+          symbol: "600879",
+          name: "test stock",
+          industry: "test",
+          quantity: 100,
+          avgCost: 100,
+          initialStopPrice: 94,
+          stopPrice: 121,
+          profitStopPrice: 113.5,
+          highestPriceSinceEntry: 130,
+          profitProtectionStage: "protect45",
+          takeProfitPrice: 140,
+          openedAt: "2026-06-09T10:00:00.000Z",
+          updatedAt: "2026-06-09T10:00:00.000Z",
+          reason: "entry"
+        }
+      ]
+    };
+
+    const result = generatePaperTradingPlan({
+      account,
+      candidates: [],
+      quotes: { "600879": 120 },
+      position: normalPosition,
+      tradedAt: "2026-06-10T15:10:00.000Z"
+    });
+
+    expect(result.trades[0]).toMatchObject({
+      side: "sell",
+      symbol: "600879",
+      quantity: 100,
+      price: 120,
+      realizedPnl: 2000,
+      realizedPnlPct: 20
+    });
+    expect(result.trades[0].reason).toContain("profit_protection_stop");
     expect(result.account.holdings).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
 import type { PositionStatus, RuleResult, SignalType } from "./types";
+import { calculateAtr, calculateProfitProtectionStop, type ProfitProtectionStage, type ProtectionPriceBar } from "./profitProtection";
 
 export type PaperTradeSide = "buy" | "sell";
 
@@ -8,7 +9,13 @@ export interface PaperHolding {
   industry: string;
   quantity: number;
   avgCost: number;
+  initialStopPrice?: number;
   stopPrice: number;
+  profitStopPrice?: number;
+  atrStopPrice?: number;
+  highestPriceSinceEntry?: number;
+  profitProtectionStage?: ProfitProtectionStage;
+  protectedProfitPct?: number;
   takeProfitPrice: number;
   openedAt: string;
   updatedAt: string;
@@ -95,6 +102,8 @@ export interface PaperCandidate {
 export interface PaperTradingPlanInput {
   account: PaperAccount;
   candidates: PaperCandidate[];
+  quotes?: Record<string, number>;
+  holdingBars?: Record<string, ProtectionPriceBar[]>;
   position: PositionStatus;
   tradedAt: string;
 }
@@ -156,6 +165,44 @@ function sameDayBuyBasis(account: PaperAccount, asOfDate: string): Record<string
     };
     return acc;
   }, {});
+}
+
+function replaceHolding(account: PaperAccount, holding: PaperHolding): PaperAccount {
+  return {
+    ...account,
+    holdings: account.holdings.map((item) => (item.symbol === holding.symbol ? holding : item))
+  };
+}
+
+function refreshPaperHoldingRisk(
+  holding: PaperHolding,
+  currentPrice: number,
+  bars: ProtectionPriceBar[] | undefined,
+  updatedAt: string
+): PaperHolding {
+  const initialStopPrice = holding.initialStopPrice && holding.initialStopPrice > 0 ? holding.initialStopPrice : holding.stopPrice;
+  const latestHigh = bars && bars.length > 0 ? Math.max(bars[bars.length - 1].high, currentPrice) : currentPrice;
+  const highestPrice = Math.max(holding.highestPriceSinceEntry ?? holding.avgCost, latestHigh);
+  const atr = bars && bars.length >= 2 ? calculateAtr(bars, 22) : undefined;
+  const protection = calculateProfitProtectionStop({
+    entryPrice: holding.avgCost,
+    initialStopPrice,
+    currentStopPrice: holding.stopPrice,
+    highestPrice,
+    atr
+  });
+
+  return {
+    ...holding,
+    initialStopPrice: round(initialStopPrice),
+    highestPriceSinceEntry: protection.highestPrice,
+    stopPrice: protection.effectiveStopPrice,
+    profitStopPrice: protection.profitStopPrice,
+    atrStopPrice: protection.atrStopPrice,
+    profitProtectionStage: protection.stage,
+    protectedProfitPct: protection.protectedProfitPct,
+    updatedAt
+  };
 }
 
 function dailyPnlBasis(
@@ -257,23 +304,33 @@ export function applyPaperTrade(account: PaperAccount, input: PaperTradeInput): 
   if (input.side === "buy") {
     const spend = Math.min(amount, account.cash);
     if (spend < amount) return account;
+    const inputStopPrice = input.stopPrice ?? round(price * 0.93);
     const nextHolding: PaperHolding = existing
-      ? {
+      ? (() => {
+          const nextAvgCost = round((existing.avgCost * existing.quantity + amount) / (existing.quantity + quantity));
+          return {
           ...existing,
           quantity: existing.quantity + quantity,
-          avgCost: round((existing.avgCost * existing.quantity + amount) / (existing.quantity + quantity)),
-          stopPrice: input.stopPrice ?? existing.stopPrice,
+          avgCost: nextAvgCost,
+          initialStopPrice: existing.initialStopPrice ?? existing.stopPrice,
+          highestPriceSinceEntry: Math.max(existing.highestPriceSinceEntry ?? existing.avgCost, price, nextAvgCost),
+          stopPrice: Math.max(existing.stopPrice, input.stopPrice ?? existing.stopPrice),
           takeProfitPrice: input.takeProfitPrice ?? existing.takeProfitPrice,
           updatedAt: input.tradedAt,
           reason: input.reason
-        }
+        };
+        })()
       : {
           symbol,
           name: input.name,
           industry: input.industry ?? "未分类",
           quantity,
           avgCost: round(price),
-          stopPrice: input.stopPrice ?? round(price * 0.93),
+          initialStopPrice: inputStopPrice,
+          stopPrice: inputStopPrice,
+          highestPriceSinceEntry: round(price),
+          profitProtectionStage: "initial",
+          protectedProfitPct: 0,
           takeProfitPrice: input.takeProfitPrice ?? round(price * 1.4),
           openedAt: input.tradedAt,
           updatedAt: input.tradedAt,
@@ -413,27 +470,35 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
   const trades: PaperTrade[] = [];
   const decisions: string[] = [];
   const candidateDecisions: PaperCandidateDecision[] = [];
-  const quotes = Object.fromEntries(input.candidates.map((candidate) => [normalizedSymbol(candidate.symbol), candidate.price]));
+  const candidateQuotes = Object.fromEntries(input.candidates.map((candidate) => [normalizedSymbol(candidate.symbol), candidate.price]));
+  const quotes = { ...(input.quotes ?? {}), ...candidateQuotes };
   const exitedSymbols = new Set<string>();
 
   for (const holding of input.account.holdings) {
     const currentPrice = quotes[holding.symbol] ?? holding.avgCost;
-    if (currentPrice <= holding.stopPrice || currentPrice >= holding.takeProfitPrice) {
-      const reason = currentPrice <= holding.stopPrice ? `触发止损 ${holding.stopPrice}` : `触发止盈 ${holding.takeProfitPrice}`;
+    const refreshedHolding = refreshPaperHoldingRisk(holding, currentPrice, input.holdingBars?.[holding.symbol], input.tradedAt);
+    nextAccount = replaceHolding(nextAccount, refreshedHolding);
+    if (currentPrice <= refreshedHolding.stopPrice || currentPrice >= refreshedHolding.takeProfitPrice) {
+      const initialStopPrice = refreshedHolding.initialStopPrice ?? refreshedHolding.stopPrice;
+      const stopReason =
+        refreshedHolding.stopPrice > initialStopPrice
+          ? `profit_protection_stop ${refreshedHolding.stopPrice}`
+          : `触发止损 ${refreshedHolding.stopPrice}`;
+      const reason = currentPrice <= refreshedHolding.stopPrice ? stopReason : `触发止盈 ${refreshedHolding.takeProfitPrice}`;
       const beforeCount = nextAccount.trades.length;
       nextAccount = applyPaperTrade(nextAccount, {
         side: "sell",
-        symbol: holding.symbol,
-        name: holding.name,
-        industry: holding.industry,
-        quantity: holding.quantity,
+        symbol: refreshedHolding.symbol,
+        name: refreshedHolding.name,
+        industry: refreshedHolding.industry,
+        quantity: refreshedHolding.quantity,
         price: currentPrice,
         reason,
         tradedAt: input.tradedAt
       });
       trades.push(...nextAccount.trades.slice(beforeCount));
-      exitedSymbols.add(holding.symbol);
-      decisions.push(`${holding.symbol} ${reason}`);
+      exitedSymbols.add(refreshedHolding.symbol);
+      decisions.push(`${refreshedHolding.symbol} ${reason}`);
     }
   }
 
