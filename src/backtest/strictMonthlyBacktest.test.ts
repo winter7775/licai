@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DailyBar, HistoryAnalysis, SpotStock } from "../live/marketScreener";
-import { buildMonthlyUniverseSnapshots, runStrictMonthlyBacktest } from "./strictMonthlyBacktest";
+import { buildMonthlyUniverseSnapshots, runStrictMonthlyBacktest, runStrictMonthlyBacktestLazy } from "./strictMonthlyBacktest";
 
 function stock(symbol: string, name = symbol): SpotStock {
   return {
@@ -93,6 +93,37 @@ describe("strict monthly universe snapshots", () => {
 });
 
 describe("strict monthly backtest replay", () => {
+  it("lazy replay only loads histories needed by monthly pools", async () => {
+    const tradable = risingBars("000001");
+    const excluded = risingBars("000002");
+    const loadedSymbols: string[] = [];
+
+    await runStrictMonthlyBacktestLazy({
+      stocks: [tradable.stock, excluded.stock],
+      benchmarkBars: tradable.history.map((daily) => ({ ...daily })),
+      monthlySnapshots: [{ activeMonth: "2020-05", asOfDate: "2020-04-29", symbols: ["000001"], rankMetric: "trailing_amount" }],
+      loadHistory: async (symbol) => {
+        loadedSymbols.push(symbol);
+        return symbol === "000001" ? tradable.history : excluded.history;
+      },
+      config: {
+        initialCapital: 200_000,
+        warmupDays: 120,
+        monthlyPoolSize: 1,
+        monthlyPoolLookbackDays: 20,
+        maxExposurePct: 35,
+        maxSinglePositionPct: 10,
+        maxTrialSinglePositionPct: 3,
+        maxTrialTotalPositionPct: 10,
+        maxHoldings: 8,
+        minBuyAmount: 1_000,
+        lotSize: 100
+      }
+    });
+
+    expect([...new Set(loadedSymbols)]).toEqual(["000001"]);
+  });
+
   it("uses caller-provided monthly snapshots instead of rebuilding the pool from all loaded histories", () => {
     const tradable = risingBars("000001");
     const excluded = risingBars("000002");

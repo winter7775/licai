@@ -7,12 +7,11 @@ import { fetchStockHistory } from "./eastmoneyProvider";
 import { loadRoughBacktestBenchmark, loadRoughBacktestSpot } from "./roughMonteCarloJob";
 import { selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/live/marketScreener";
 import {
-  runStrictMonthlyBacktest,
+  runStrictMonthlyBacktestLazy,
   runStrictMonteCarloFromClosedTrades,
   type MonthlyUniverseSnapshot,
   type StrictBacktestResult,
-  type StrictMonteCarloResult,
-  type StrictUniverseItem
+  type StrictMonteCarloResult
 } from "../src/backtest/strictMonthlyBacktest";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -269,26 +268,17 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
   const requiredSymbols = new Set(monthlySnapshots.flatMap((snapshot) => snapshot.symbols));
   const sourceBySymbol = new Map(marketCapUniverse.map((stock) => [stock.symbol, stock]));
   const requiredStocks = [...requiredSymbols].map((symbol) => sourceBySymbol.get(symbol)).filter((stock): stock is SpotStock => Boolean(stock));
-  const universeRows = await mapWithConcurrency(requiredStocks, HISTORY_WORKERS, async (stock, index) => {
-    process.stdout.write(`strict replay history ${index + 1}/${requiredStocks.length} ${stock.symbol}\n`);
-    try {
-      const history = await historyWithCache(stock.symbol, HISTORY_LIMIT);
-      return history.length >= 260 ? ({ stock, history } satisfies StrictUniverseItem) : null;
-    } catch (error) {
-      process.stdout.write(`strict replay skip ${stock.symbol}: ${error instanceof Error ? error.message : String(error)}\n`);
-      return null;
-    }
-  }, HISTORY_REQUEST_DELAY_MS);
-  const universe = universeRows.filter((item): item is StrictUniverseItem => item !== null);
   const historyFailedCount = marketCapUniverse.length - usableIndexes.length;
+  const fallbackBars = requiredStocks[0] ? await historyWithCache(requiredStocks[0].symbol, HISTORY_LIMIT) : undefined;
   const benchmark = await loadRoughBacktestBenchmark({
     limit: HISTORY_LIMIT,
-    fallbackBars: universe[0]?.history
+    fallbackBars
   });
-  const rawBacktest = runStrictMonthlyBacktest({
-    universe,
+  const rawBacktest = await runStrictMonthlyBacktestLazy({
+    stocks: requiredStocks,
     benchmarkBars: benchmark.bars,
     monthlySnapshots,
+    loadHistory: (symbol) => historyWithCache(symbol, HISTORY_LIMIT),
     config: {
       initialCapital: 200_000,
       monthlyPoolSize: MONTHLY_POOL_SIZE,
@@ -297,6 +287,9 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       maxSinglePositionPct: 10,
       maxTrialSinglePositionPct: 3,
       maxTrialTotalPositionPct: 10
+    },
+    onMonthStart: (info) => {
+      process.stdout.write(`strict replay month ${info.activeMonth} ${info.date} load ${info.loadedSymbolCount}\n`);
     },
     onAuditRecord: (record) => {
       auditStream.write(`${JSON.stringify(record)}\n`);
@@ -314,7 +307,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       SOURCE_LIMIT > 0
         ? `Source universe is capped at ${SOURCE_LIMIT} current top-market-cap stocks before historical monthly replay.`
         : "Source universe uses the full current A-share spot universe before historical monthly replay.",
-      `Two-pass replay loaded ${universe.length} stocks from ${requiredStocks.length} monthly-pool symbols after indexing ${usableIndexes.length} usable source histories.`
+      `Lazy replay streams ${requiredStocks.length} monthly-pool symbols after indexing ${usableIndexes.length} usable source histories.`
     ]
   };
   const monteCarlo = runStrictMonteCarloFromClosedTrades(backtest.closedTrades, {
@@ -331,7 +324,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       marketCapTopPct: MARKET_CAP_TOP_PCT,
       sourceUniverseCount: marketCapUniverse.length,
       usableUniverseCount: usableIndexes.length,
-      replayUniverseCount: universe.length,
+      replayUniverseCount: requiredStocks.length,
       monthlySnapshotCount: monthlySnapshots.length,
       requiredReplaySymbols: requiredStocks.length,
       historyFailedCount,

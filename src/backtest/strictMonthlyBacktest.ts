@@ -641,6 +641,341 @@ export function runStrictMonthlyBacktest(input: {
   };
 }
 
+export async function runStrictMonthlyBacktestLazy(input: {
+  stocks: SpotStock[];
+  benchmarkBars: DailyBar[];
+  monthlySnapshots: MonthlyUniverseSnapshot[];
+  loadHistory: (symbol: string) => Promise<DailyBar[]>;
+  config?: Partial<StrictBacktestConfig>;
+  analyze?: (stock: SpotStock, bars: DailyBar[], options: { benchmarkBars?: DailyBar[] }) => HistoryAnalysis;
+  onMonthStart?: (info: { activeMonth: string; date: string; loadedSymbolCount: number }) => void;
+  onAuditRecord?: (record: StrictAuditRecord) => void;
+}): Promise<StrictBacktestResult> {
+  const config = { ...DEFAULT_CONFIG, ...input.config };
+  const analyze = input.analyze ?? analyzeHistory;
+  const benchmarkDates = [...new Set(input.benchmarkBars.map((bar) => bar.date))].sort();
+  const monthlySnapshots = input.monthlySnapshots;
+  const snapshotByMonth = new Map(monthlySnapshots.map((snapshot) => [snapshot.activeMonth, snapshot]));
+  const stockBySymbol = new Map(input.stocks.map((stock) => [stock.symbol, stock]));
+  const benchmarkIndex = historyIndexByDate(input.benchmarkBars);
+  const startedAt = benchmarkDates[Math.min(config.warmupDays, benchmarkDates.length - 1)] ?? "";
+  const endedAt = benchmarkDates[benchmarkDates.length - 1] ?? "";
+  const histories = new Map<string, DailyBar[]>();
+  const barMaps = new Map<string, Map<string, DailyBar>>();
+  const indexMaps = new Map<string, Map<string, number>>();
+
+  async function ensureHistory(symbol: string): Promise<DailyBar[] | null> {
+    const cached = histories.get(symbol);
+    if (cached) return cached;
+    const history = await input.loadHistory(symbol);
+    if (history.length < 260) return null;
+    histories.set(symbol, history);
+    barMaps.set(symbol, barByDate(history));
+    indexMaps.set(symbol, historyIndexByDate(history));
+    return history;
+  }
+
+  function retainLoadedSymbols(symbols: Set<string>): void {
+    for (const symbol of histories.keys()) {
+      if (symbols.has(symbol)) continue;
+      histories.delete(symbol);
+      barMaps.delete(symbol);
+      indexMaps.delete(symbol);
+    }
+  }
+
+  let cash = config.initialCapital;
+  let holdings: Holding[] = [];
+  let peakAssets = config.initialCapital;
+  let pendingBuys: PendingBuy[] = [];
+  let loadedMonth = "";
+  const trades: RoughTradeRecord[] = [];
+  const closedTrades: StrictClosedTrade[] = [];
+  const equityCurve: RoughEquityPoint[] = [];
+  const auditSummary: StrictBacktestResult["auditSummary"] = {
+    records: 0,
+    buySignals: 0,
+    trialSignals: 0,
+    watch: 0,
+    rejected: 0,
+    errors: 0
+  };
+
+  for (const date of benchmarkDates.filter((day) => day >= startedAt)) {
+    const benchmarkEndIndex = benchmarkIndex.get(date);
+    if (benchmarkEndIndex === undefined || benchmarkEndIndex < config.warmupDays) continue;
+    const currentMonth = monthKey(date);
+    const benchmarkHistory = input.benchmarkBars.slice(0, benchmarkEndIndex + 1);
+    const snapshot = snapshotByMonth.get(currentMonth);
+    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config.maxExposurePct);
+    const neededSymbols = new Set<string>([
+      ...holdings.map((holding) => holding.symbol),
+      ...pendingBuys.map((order) => order.symbol)
+    ]);
+    if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
+      for (const symbol of snapshot.symbols) neededSymbols.add(symbol);
+    }
+    if (currentMonth !== loadedMonth) {
+      retainLoadedSymbols(neededSymbols);
+      loadedMonth = currentMonth;
+      input.onMonthStart?.({ activeMonth: currentMonth, date, loadedSymbolCount: neededSymbols.size });
+    }
+    for (const symbol of neededSymbols) {
+      await ensureHistory(symbol);
+    }
+
+    const quoteFor = (symbol: string) => barMaps.get(symbol)?.get(date)?.close;
+
+    const executableBuys = pendingBuys;
+    pendingBuys = [];
+    for (const order of executableBuys) {
+      if (holdings.length >= config.maxHoldings || holdings.some((holding) => holding.symbol === order.symbol)) continue;
+      const executionBar = barMaps.get(order.symbol)?.get(date);
+      if (!executionBar || executionBar.open <= 0) continue;
+      const currentMv = marketValue(holdings, quoteFor);
+      const totalAssets = round(cash + currentMv);
+      const sizing: RoughPositionSizing = calculateRoughPositionSize({
+        grade: order.grade,
+        price: executionBar.open,
+        totalAssets,
+        cash,
+        currentMarketValue: currentMv,
+        currentTrialMarketValue: trialMarketValue(holdings, quoteFor),
+        maxExposurePct,
+        config
+      });
+      if (!sizing.canBuy) continue;
+      cash = round(cash - sizing.amount);
+      holdings.push({
+        symbol: order.symbol,
+        name: order.name,
+        quantity: sizing.quantity,
+        avgCost: round(executionBar.open),
+        stopPrice: order.stopPrice,
+        takeProfitPrice: round(executionBar.open * 1.4),
+        grade: order.grade,
+        entryDate: date,
+        entryAmount: sizing.amount,
+        entryPositionPct: sizing.positionPct,
+        reason: order.reason
+      });
+      trades.push({
+        symbol: order.symbol,
+        name: order.name,
+        side: "buy",
+        date,
+        price: round(executionBar.open),
+        quantity: sizing.quantity,
+        amount: sizing.amount,
+        grade: order.grade,
+        reason: `${order.reason}; signalDate=${order.signalDate}; score=${round(order.score)}`,
+        positionPct: sizing.positionPct
+      });
+    }
+
+    const nextHoldings: Holding[] = [];
+    for (const holding of holdings) {
+      const bar = barMaps.get(holding.symbol)?.get(date);
+      if (!bar) {
+        nextHoldings.push(holding);
+        continue;
+      }
+      const stopHit = bar.low <= holding.stopPrice;
+      const takeProfitHit = bar.high >= holding.takeProfitPrice;
+      if (!stopHit && !takeProfitHit) {
+        nextHoldings.push(holding);
+        continue;
+      }
+      const exitPrice = stopHit ? holding.stopPrice : holding.takeProfitPrice;
+      const amount = round(holding.quantity * exitPrice);
+      const pnl = round((exitPrice - holding.avgCost) * holding.quantity);
+      const returnPct = round(((exitPrice / holding.avgCost) - 1) * 100);
+      cash = round(cash + amount);
+      const exitReason = stopHit ? "stop_loss" : "take_profit";
+      trades.push({
+        symbol: holding.symbol,
+        name: holding.name,
+        side: "sell",
+        date,
+        price: round(exitPrice),
+        quantity: holding.quantity,
+        amount,
+        grade: holding.grade,
+        reason: exitReason,
+        pnl,
+        returnPct,
+        positionPct: holding.entryPositionPct
+      });
+      closedTrades.push({
+        symbol: holding.symbol,
+        name: holding.name,
+        entryDate: holding.entryDate,
+        exitDate: date,
+        entryPrice: holding.avgCost,
+        exitPrice: round(exitPrice),
+        holdingDays: Math.max(1, benchmarkDates.indexOf(date) - benchmarkDates.indexOf(holding.entryDate)),
+        returnPct,
+        positionPct: holding.entryPositionPct,
+        pnl,
+        grade: holding.grade,
+        entryReason: holding.reason,
+        exitReason
+      });
+    }
+    holdings = nextHoldings;
+
+    const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
+    const candidates: Candidate[] = [];
+    if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
+      for (const symbol of snapshot.symbols) {
+        const stock = stockBySymbol.get(symbol);
+        if (!stock) continue;
+        if (heldSymbols.has(symbol)) {
+          recordAudit(input.onAuditRecord, auditSummary, {
+            date,
+            symbol,
+            name: stock.name,
+            poolAsOfDate: snapshot.asOfDate,
+            historyEndDate: date,
+            benchmarkEndDate: date,
+            decision: "held",
+            failedHardRules: [],
+            failedRules: [],
+            passedRules: [],
+            reason: "already holding"
+          });
+          continue;
+        }
+        const itemIndex = indexMaps.get(symbol)?.get(date);
+        if (itemIndex === undefined || itemIndex < config.warmupDays) {
+          recordAudit(input.onAuditRecord, auditSummary, {
+            date,
+            symbol,
+            name: stock.name,
+            poolAsOfDate: snapshot.asOfDate,
+            historyEndDate: itemIndex === undefined ? "" : date,
+            benchmarkEndDate: date,
+            decision: "insufficient_history",
+            failedHardRules: ["history.warmup"],
+            failedRules: ["history.warmup"],
+            passedRules: [],
+            reason: "not enough prior bars"
+          });
+          continue;
+        }
+        try {
+          const history = histories.get(symbol)?.slice(0, itemIndex + 1) ?? [];
+          const current = history[history.length - 1];
+          const stockAtDate: SpotStock = {
+            ...stock,
+            price: current.close,
+            changePct: current.changePct,
+            changeAmount: current.changeAmount,
+            volume: current.volume,
+            amount: current.amount,
+            turnoverRate: current.turnoverRate,
+            high: current.high,
+            low: current.low,
+            open: current.open,
+            previousClose: current.close - current.changeAmount
+          };
+          const analysis = analyze(stockAtDate, history, { benchmarkBars: benchmarkHistory });
+          const grade = candidateGrade(analysis.signalType, analysis.rules, current.close);
+          const rules = summarizeRules(analysis.rules);
+          const decision = auditDecision(grade, analysis.signalType);
+          recordAudit(input.onAuditRecord, auditSummary, {
+            date,
+            symbol,
+            name: stock.name,
+            poolAsOfDate: snapshot.asOfDate,
+            historyEndDate: current.date,
+            benchmarkEndDate: input.benchmarkBars[benchmarkEndIndex]?.date ?? date,
+            decision,
+            signalType: analysis.signalType,
+            grade: grade ?? undefined,
+            score: analysisScore(analysis),
+            price: current.close,
+            stopPrice: analysis.stopPrice,
+            ...rules,
+            reason: grade ? `${analysis.signalType} signal for next trading day` : rules.failedHardRules[0] ?? "watch only"
+          });
+          if (!grade) continue;
+          candidates.push({
+            symbol,
+            name: stock.name,
+            grade,
+            signalType: analysis.signalType,
+            score: analysisScore(analysis),
+            price: current.close,
+            stopPrice: analysis.stopPrice,
+            takeProfitPrice: round(current.close * 1.4),
+            reason: analysis.signalType,
+            rules: analysis.rules
+          });
+        } catch (error) {
+          recordAudit(input.onAuditRecord, auditSummary, {
+            date,
+            symbol,
+            name: stock.name,
+            poolAsOfDate: snapshot.asOfDate,
+            historyEndDate: date,
+            benchmarkEndDate: date,
+            decision: "error",
+            failedHardRules: ["analysis.error"],
+            failedRules: ["analysis.error"],
+            passedRules: [],
+            reason: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+
+    candidates.sort((left, right) => (left.grade === right.grade ? right.score - left.score : left.grade === "A" ? -1 : 1));
+    pendingBuys = candidates.map((candidate) => ({
+      signalDate: date,
+      symbol: candidate.symbol,
+      name: candidate.name,
+      grade: candidate.grade,
+      stopPrice: candidate.stopPrice,
+      takeProfitPrice: candidate.takeProfitPrice,
+      reason: candidate.reason,
+      score: candidate.score
+    }));
+
+    const endingMarketValue = marketValue(holdings, quoteFor);
+    const totalAssets = round(cash + endingMarketValue);
+    peakAssets = Math.max(peakAssets, totalAssets);
+    equityCurve.push({
+      date,
+      totalAssets,
+      cash: round(cash),
+      marketValue: round(endingMarketValue),
+      exposurePct: totalAssets > 0 ? round((endingMarketValue / totalAssets) * 100) : 0,
+      drawdownPct: peakAssets > 0 ? round(((peakAssets - totalAssets) / peakAssets) * 100) : 0
+    });
+  }
+
+  const stats = tradeStats(closedTrades, config.initialCapital, equityCurve);
+  return {
+    config,
+    startedAt,
+    endedAt,
+    initialCapital: config.initialCapital,
+    ...stats,
+    closedTrades,
+    trades,
+    equityCurve,
+    monthlySnapshots,
+    auditSummary,
+    warnings: [
+      "Strict replay uses monthly pools built from prior month-end historical bars only.",
+      "Current v1 ranks the monthly top pool by trailing traded amount because historical market-cap/PE point-in-time data is not yet wired.",
+      "Signals are generated after the close and executed on the next trading day's open.",
+      "Lazy replay loads only the current month pool plus active orders and holdings to keep full-universe runs memory bounded."
+    ]
+  };
+}
+
 export function runStrictMonteCarloFromClosedTrades(
   trades: StrictClosedTrade[],
   options: RoughMonteCarloOptions
