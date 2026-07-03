@@ -279,6 +279,23 @@ export function buildStrictMonthlyBacktestMarkdown(input: {
   ].join("\n");
 }
 
+export interface StrictGradeVariantSpec {
+  label: string;
+  allowedGrades: Array<"A" | "B">;
+}
+
+export async function runStrictGradeVariants(input: {
+  variants: StrictGradeVariantSpec[];
+  runVariant: (variant: StrictGradeVariantSpec) => Promise<StrictBacktestResult>;
+}): Promise<Array<{ label: string; backtest: StrictBacktestResult }>> {
+  const results: Array<{ label: string; backtest: StrictBacktestResult }> = [];
+  for (const variant of input.variants) {
+    const backtest = await input.runVariant(variant);
+    results.push({ label: variant.label, backtest });
+  }
+  return results;
+}
+
 export async function runStrictMonthlyBacktestJob(): Promise<{
   jsonPath: string;
   markdownPath: string;
@@ -346,11 +363,12 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
       `Lazy replay streams ${requiredStocks.length} monthly-pool symbols after indexing ${usableIndexes.length} usable source histories.`
     ]
   };
-  const variants = await Promise.all(
-    [
+  const variants = await runStrictGradeVariants({
+    variants: [
       { label: "A-only", allowedGrades: ["A"] as const },
       { label: "B-only", allowedGrades: ["B"] as const }
-    ].map(async (variant) => {
+    ],
+    runVariant: async (variant) => {
       const result = await runStrictMonthlyBacktestLazy({
         stocks: requiredStocks,
         benchmarkBars: benchmark.bars,
@@ -364,9 +382,9 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
           process.stdout.write(`strict replay ${variant.label} month ${info.activeMonth} ${info.date} load ${info.loadedSymbolCount}\n`);
         }
       });
-      return { label: variant.label, backtest: { ...result, warnings: backtest.warnings } };
-    })
-  );
+      return { ...result, warnings: backtest.warnings };
+    }
+  });
   const monteCarlo = runStrictMonteCarloFromClosedTrades(backtest.closedTrades, {
     initialCapital: 200_000,
     iterations: MONTE_CARLO_ITERATIONS,

@@ -3,6 +3,7 @@ import {
   buildHistoryMonthlyIndex,
   buildMonthlySnapshotsFromHistoryIndexes,
   buildStrictMonthlyBacktestMarkdown,
+  runStrictGradeVariants,
   selectStrictSourceUniverse
 } from "./strictMonthlyBacktestJob";
 import type { StrictBacktestResult, StrictMonteCarloResult } from "../src/backtest/strictMonthlyBacktest";
@@ -131,5 +132,28 @@ describe("strict monthly backtest job report", () => {
     expect(markdown).toContain("B-only");
     expect(markdown).toContain("/tmp/audit.jsonl");
     expect(markdown).toContain("strict warning");
+  });
+
+  it("runs A/B variant replays sequentially to avoid duplicate history memory", async () => {
+    const events: string[] = [];
+    const backtest = {
+      warnings: []
+    } as StrictBacktestResult;
+
+    const variants = await runStrictGradeVariants({
+      variants: [
+        { label: "A-only", allowedGrades: ["A"] },
+        { label: "B-only", allowedGrades: ["B"] }
+      ],
+      runVariant: async (variant) => {
+        events.push(`start ${variant.label}`);
+        await Promise.resolve();
+        events.push(`end ${variant.label}`);
+        return backtest;
+      }
+    });
+
+    expect(events).toEqual(["start A-only", "end A-only", "start B-only", "end B-only"]);
+    expect(variants.map((variant) => variant.label)).toEqual(["A-only", "B-only"]);
   });
 });
