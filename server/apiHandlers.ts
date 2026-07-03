@@ -1,6 +1,7 @@
 import path from "node:path";
 import {
   generatePaperTradingPlan,
+  refreshPaperAccountRisk,
   summarizePaperAccount,
   type PaperAccount,
   type PaperAccountSummary,
@@ -375,13 +376,16 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
     }
   }
 
+  const refreshedAt = new Date().toISOString();
+  const refreshedAccount = refreshPaperAccountRisk(account, quotes, {}, refreshedAt);
+
   return {
-    account,
-    summary: summarizePaperAccount(account, quotes, previousCloses),
+    account: refreshedAccount,
+    summary: summarizePaperAccount(refreshedAccount, quotes, previousCloses),
     quoteStatus: {
       mode: warnings.length > 0 ? "fallback" : "live",
       warnings,
-      updatedAt: new Date().toISOString()
+      updatedAt: refreshedAt
     },
     scanState
   };

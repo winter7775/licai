@@ -240,6 +240,7 @@ describe("PaperTradingPage", () => {
     expect(screen.getByTestId("paper-near-candidate-600002").textContent).toContain("本轮额度");
     expect(screen.getByTestId("paper-holding-row-600001").textContent).toContain("500");
     expect(screen.getByTestId("paper-holding-row-600001").textContent).toContain("4.76%");
+    expect(screen.getByTestId("paper-holding-row-600001").textContent).toContain("利润线");
   });
 
   it("expands a holding to show chart area and symbol trade ledger", async () => {

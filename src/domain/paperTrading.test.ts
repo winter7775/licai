@@ -4,6 +4,7 @@ import {
   applyPaperTrade,
   createInitialPaperAccount,
   generatePaperTradingPlan,
+  refreshPaperAccountRisk,
   summarizePaperAccount,
   type PaperAccount,
   type PaperCandidate
@@ -454,6 +455,37 @@ describe("paper trading auto plan", () => {
       profitStopPrice: 100,
       highestPriceSinceEntry: 110,
       profitProtectionStage: "breakeven"
+    });
+  });
+
+  it("refreshes stale holdings with profit protection from current quotes", () => {
+    const account: PaperAccount = {
+      ...createInitialPaperAccount("2026-06-09T09:30:00.000Z"),
+      cash: 196269,
+      holdings: [
+        {
+          symbol: "002422",
+          name: "test stock",
+          industry: "test",
+          quantity: 100,
+          avgCost: 37.31,
+          initialStopPrice: 36.94,
+          stopPrice: 36.94,
+          takeProfitPrice: 52.23,
+          openedAt: "2026-06-25T15:00:00.000Z",
+          updatedAt: "2026-06-25T15:00:00.000Z",
+          reason: "entry"
+        }
+      ]
+    };
+
+    const refreshed = refreshPaperAccountRisk(account, { "002422": 44.72 }, {}, "2026-07-03T15:00:00.000Z");
+
+    expect(refreshed.holdings[0]).toMatchObject({
+      highestPriceSinceEntry: 44.72,
+      profitProtectionStage: "protect60",
+      profitStopPrice: 41.76,
+      stopPrice: 41.76
     });
   });
 

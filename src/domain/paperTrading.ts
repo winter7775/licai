@@ -208,6 +208,22 @@ function refreshPaperHoldingRisk(
   };
 }
 
+export function refreshPaperAccountRisk(
+  account: PaperAccount,
+  quotes: Record<string, number> = {},
+  holdingBars: Record<string, ProtectionPriceBar[]> = {},
+  updatedAt = new Date().toISOString()
+): PaperAccount {
+  return {
+    ...account,
+    holdings: account.holdings.map((holding) => {
+      const currentPrice = quotes[holding.symbol] && quotes[holding.symbol] > 0 ? quotes[holding.symbol] : holding.avgCost;
+      return refreshPaperHoldingRisk(holding, currentPrice, holdingBars[holding.symbol], updatedAt);
+    }),
+    updatedAt
+  };
+}
+
 function dailyPnlBasis(
   holding: PaperHolding,
   previousClose: number | undefined,

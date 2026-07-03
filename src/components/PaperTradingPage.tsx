@@ -676,7 +676,10 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
                           <strong>有效 {money(holding.stopPrice)}</strong>
                           <small>初始 {money(holding.initialStopPrice ?? holding.stopPrice)} / 止盈 {money(holding.takeProfitPrice)}</small>
                           <small>
-                            {protectionStageText(holding.profitProtectionStage)} · 最高 {money(holding.highestPriceSinceEntry)}
+                            {protectionStageText(holding.profitProtectionStage)} · 最高 {money(holding.highestPriceSinceEntry)} · 保护 {pct(holding.protectedProfitPct)}
+                          </small>
+                          <small>
+                            利润线 {money(holding.profitStopPrice)} / ATR线 {money(holding.atrStopPrice)}
                           </small>
                         </div>
                       </td>
