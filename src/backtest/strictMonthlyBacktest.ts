@@ -9,7 +9,7 @@ import {
 } from "./tradeExecution";
 import {
   calculateRoughPositionSize,
-  calculateBenchmarkExposureLimit,
+  calculateRiskManagedExposureLimit,
   runMonteCarloFromClosedTrades,
   type RoughBacktestConfig,
   type RoughClosedTrade,
@@ -286,8 +286,12 @@ function candidateGrade(signalType: SignalType, rules: RuleResult[], price: numb
   return breakout.extensionPct >= -3 && breakout.extensionPct <= 3 && breakout.volumeRatio >= 0.9 ? "B" : null;
 }
 
-function benchmarkMaxExposure(benchmark: DailyBar[], config: StrictBacktestConfig): number {
-  return calculateBenchmarkExposureLimit(benchmark, config);
+function currentPortfolioDrawdownPct(peakAssets: number, totalAssets: number): number {
+  return peakAssets > 0 ? round(((peakAssets - totalAssets) / peakAssets) * 100) : 0;
+}
+
+function benchmarkMaxExposure(benchmark: DailyBar[], config: StrictBacktestConfig, portfolioDrawdownPct: number): number {
+  return calculateRiskManagedExposureLimit(benchmark, config, portfolioDrawdownPct);
 }
 
 function marketValue(holdings: Holding[], quoteFor: (symbol: string) => number | undefined): number {
@@ -442,6 +446,11 @@ export function runStrictMonthlyBacktest(input: {
       const buyPrice = executionPrice("buy", executionBar.open, config);
       const currentMv = marketValue(holdings, quoteFor);
       const totalAssets = round(cash + currentMv);
+      const openingMaxExposurePct = benchmarkMaxExposure(
+        benchmarkHistory,
+        config,
+        currentPortfolioDrawdownPct(peakAssets, totalAssets)
+      );
       const sizing: RoughPositionSizing = calculateRoughPositionSize({
         grade: order.grade,
         price: buyPrice,
@@ -450,7 +459,7 @@ export function runStrictMonthlyBacktest(input: {
         currentMarketValue: currentMv,
         currentTrialMarketValue: trialMarketValue(holdings, quoteFor),
         currentPortfolioRiskAmount: portfolioRiskAmount(holdings),
-        maxExposurePct: benchmarkMaxExposure(benchmarkHistory, config),
+        maxExposurePct: openingMaxExposurePct,
         config,
         stopPrice: order.stopPrice
       });
@@ -560,7 +569,13 @@ export function runStrictMonthlyBacktest(input: {
     const snapshot = snapshotByMonth.get(monthKey(date));
     const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
     const candidates: Candidate[] = [];
-    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config);
+    const signalMarketValue = marketValue(holdings, quoteFor);
+    const signalAssets = round(cash + signalMarketValue);
+    const maxExposurePct = benchmarkMaxExposure(
+      benchmarkHistory,
+      config,
+      currentPortfolioDrawdownPct(peakAssets, signalAssets)
+    );
     if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
       for (const symbol of snapshot.symbols) {
         const stock = stockBySymbol.get(symbol);
@@ -777,12 +792,18 @@ export async function runStrictMonthlyBacktestLazy(input: {
     const currentMonth = monthKey(date);
     const benchmarkHistory = input.benchmarkBars.slice(0, benchmarkEndIndex + 1);
     const snapshot = snapshotByMonth.get(currentMonth);
-    const maxExposurePct = benchmarkMaxExposure(benchmarkHistory, config);
+    const preloadQuoteFor = (symbol: string) => barMaps.get(symbol)?.get(date)?.close;
+    const preloadAssets = round(cash + marketValue(holdings, preloadQuoteFor));
+    const openingMaxExposurePct = benchmarkMaxExposure(
+      benchmarkHistory,
+      config,
+      currentPortfolioDrawdownPct(peakAssets, preloadAssets)
+    );
     const neededSymbols = new Set<string>([
       ...holdings.map((holding) => holding.symbol),
       ...pendingBuys.map((order) => order.symbol)
     ]);
-    if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
+    if (snapshot && openingMaxExposurePct > 0 && holdings.length < config.maxHoldings) {
       for (const symbol of snapshot.symbols) neededSymbols.add(symbol);
     }
     if (currentMonth !== loadedMonth) {
@@ -816,7 +837,7 @@ export async function runStrictMonthlyBacktestLazy(input: {
         currentMarketValue: currentMv,
         currentTrialMarketValue: trialMarketValue(holdings, quoteFor),
         currentPortfolioRiskAmount: portfolioRiskAmount(holdings),
-        maxExposurePct,
+        maxExposurePct: openingMaxExposurePct,
         config,
         stopPrice: order.stopPrice
       });
@@ -925,7 +946,14 @@ export async function runStrictMonthlyBacktestLazy(input: {
 
     const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
     const candidates: Candidate[] = [];
-    if (snapshot && maxExposurePct > 0 && holdings.length < config.maxHoldings) {
+    const signalMarketValue = marketValue(holdings, quoteFor);
+    const signalAssets = round(cash + signalMarketValue);
+    const signalMaxExposurePct = benchmarkMaxExposure(
+      benchmarkHistory,
+      config,
+      currentPortfolioDrawdownPct(peakAssets, signalAssets)
+    );
+    if (snapshot && signalMaxExposurePct > 0 && holdings.length < config.maxHoldings) {
       for (const symbol of snapshot.symbols) {
         const stock = stockBySymbol.get(symbol);
         if (!stock) continue;

@@ -127,6 +127,7 @@ const INITIAL_CAPITAL = 200_000;
 const MAX_SINGLE_POSITION_PCT = 12;
 const MAX_TRIAL_SINGLE_POSITION_PCT = 3;
 const MAX_TRIAL_TOTAL_POSITION_PCT = 10;
+const B_GRADE_DISABLED_REASON = "V4 disabled B-grade trial buys";
 const RISK_PER_TRADE_PCT = 1;
 const TRIAL_RISK_PER_TRADE_PCT = 0.3;
 const MAX_PORTFOLIO_RISK_PCT = 6;
@@ -515,6 +516,10 @@ function gradeRank(grade: "A" | "B"): number {
   return grade === "A" ? 0 : 1;
 }
 
+function isBGrade(grade: "A" | "B"): boolean {
+  return grade === "B";
+}
+
 function actionSummary(trades: PaperTrade[], blockedNewEntries: boolean): string {
   const buys = trades.filter((trade) => trade.side === "buy").length;
   const sells = trades.filter((trade) => trade.side === "sell").length;
@@ -596,6 +601,10 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
         candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "今日已卖出，避免回补" });
         continue;
       }
+      if (isBGrade(grade)) {
+        candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: B_GRADE_DISABLED_REASON });
+        continue;
+      }
       if (remainingExposureAmount < MIN_BUY_AMOUNT) {
         candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: "市场仓位上限不足" });
         break;
@@ -605,10 +614,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
         continue;
       }
 
-      const targetPct =
-        grade === "B"
-          ? Math.min(MAX_TRIAL_SINGLE_POSITION_PCT, targetBand.max)
-          : Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
+      const targetPct = Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
       const targetAmount = riskSizedTargetAmount({
         grade,
         price: item.price,
@@ -616,7 +622,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
         totalAssets: summary.totalAssets,
         targetPct,
         remainingExposureAmount,
-        remainingTrialAmount,
+        remainingTrialAmount: Number.POSITIVE_INFINITY,
         cash: nextAccount.cash,
         currentPortfolioRiskAmount: portfolioRiskAmount(nextAccount)
       });
@@ -627,7 +633,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
       const quantity = Math.floor(targetAmount / item.price / 100) * 100;
       if (quantity <= 0) continue;
 
-      const reason = grade === "B" ? `B级试错：${item.reason}` : item.reason;
+      const reason = item.reason;
       const beforeCount = nextAccount.trades.length;
       nextAccount = applyPaperTrade(nextAccount, {
         side: "buy",
@@ -668,10 +674,11 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
   for (const { candidate: item, grade } of sortedCandidates) {
     const symbol = normalizedSymbol(item.symbol);
     if (decidedSymbols.has(symbol)) continue;
-    const targetPct =
-      grade === "B"
-        ? Math.min(MAX_TRIAL_SINGLE_POSITION_PCT, targetBand.max)
-        : Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
+    if (isBGrade(grade)) {
+      candidateDecisions.push({ symbol, name: item.name, grade, action: "skip", reason: B_GRADE_DISABLED_REASON });
+      continue;
+    }
+    const targetPct = Math.min(item.suggestedPositionPct, MAX_SINGLE_POSITION_PCT, targetBand.max);
     const targetAmount = riskSizedTargetAmount({
       grade,
       price: item.price,
@@ -679,7 +686,7 @@ export function generatePaperTradingPlan(input: PaperTradingPlanInput): PaperTra
       totalAssets: summary.totalAssets,
       targetPct,
       remainingExposureAmount: Math.max(0, (summary.totalAssets * targetBand.max) / 100 - summary.marketValue),
-      remainingTrialAmount: Math.max(0, (summary.totalAssets * MAX_TRIAL_TOTAL_POSITION_PCT) / 100 - trialExposureAmount(summary)),
+      remainingTrialAmount: Number.POSITIVE_INFINITY,
       cash: nextAccount.cash,
       currentPortfolioRiskAmount: portfolioRiskAmount(nextAccount)
     });

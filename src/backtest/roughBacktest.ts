@@ -22,6 +22,13 @@ export interface RoughBacktestConfig extends TradeExecutionCostConfig {
   maxPortfolioRiskPct?: number;
   healthyTrendExposurePct?: number;
   strongTrendExposurePct?: number;
+  volatilityTargetPct?: number;
+  minVolatilityExposureFactor?: number;
+  drawdownSoftPct?: number;
+  drawdownSoftExposurePct?: number;
+  drawdownHardPct?: number;
+  drawdownHardExposurePct?: number;
+  drawdownCrisisPct?: number;
   maxHoldings: number;
   minBuyAmount: number;
   lotSize: number;
@@ -125,13 +132,24 @@ export interface RoughMonteCarloOptions {
   initialCapital: number;
   iterations: number;
   seed: number;
+  samplingMode?: "bootstrap_with_replacement" | "shuffle_without_replacement";
+  retainedPathCount?: number;
+  pathPointCount?: number;
+  ruinThresholdPct?: number;
 }
 
 export interface RoughMonteCarloResult {
   iterations: number;
   tradeSamplesPerRun: number;
+  samplingMode: "bootstrap_with_replacement" | "shuffle_without_replacement";
   finalAssets: QuantileSummary;
   maxDrawdownPct: QuantileSummary;
+  longestLosingStreak: QuantileSummary;
+  profitableScenarioPct: number;
+  bustedScenarioPct: number;
+  ruinThreshold: number;
+  pathPercentiles: MonteCarloPathPercentile[];
+  samplePaths: MonteCarloSamplePath[];
   lossProbabilityPct: number;
   severeDrawdownProbabilityPct: number;
 }
@@ -142,6 +160,23 @@ interface QuantileSummary {
   p50: number;
   p75: number;
   p95: number;
+}
+
+export interface MonteCarloPathPoint {
+  tradeIndex: number;
+  assets: number;
+}
+
+export interface MonteCarloPathPercentile extends QuantileSummary {
+  tradeIndex: number;
+}
+
+export interface MonteCarloSamplePath {
+  scenario: number;
+  finalAssets: number;
+  maxDrawdownPct: number;
+  longestLosingStreak: number;
+  points: MonteCarloPathPoint[];
 }
 
 interface Holding {
@@ -190,6 +225,13 @@ const DEFAULT_CONFIG: RoughBacktestConfig = {
   maxPortfolioRiskPct: 6,
   healthyTrendExposurePct: 70,
   strongTrendExposurePct: 90,
+  volatilityTargetPct: 18,
+  minVolatilityExposureFactor: 0.55,
+  drawdownSoftPct: 8,
+  drawdownSoftExposurePct: 50,
+  drawdownHardPct: 12,
+  drawdownHardExposurePct: 25,
+  drawdownCrisisPct: 18,
   maxHoldings: 8,
   minBuyAmount: 5_000,
   lotSize: 100
@@ -324,6 +366,26 @@ function maxDrawdownFromAssets(values: number[]): number {
   return round(maxDrawdown);
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function realizedAnnualizedVolatilityPct(benchmark: DailyBar[], lookbackDays = 20): number {
+  const closes = benchmark.map((bar) => bar.close).filter((value) => value > 0);
+  if (closes.length < 2) return 0;
+  const returns: number[] = [];
+  const start = Math.max(1, closes.length - lookbackDays);
+  for (let index = start; index < closes.length; index += 1) {
+    const previous = closes[index - 1];
+    const current = closes[index];
+    if (previous > 0) returns.push(current / previous - 1);
+  }
+  if (returns.length < 2) return 0;
+  const avg = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const variance = returns.reduce((sum, value) => sum + (value - avg) ** 2, 0) / (returns.length - 1);
+  return Math.sqrt(variance) * Math.sqrt(252) * 100;
+}
+
 export function calculateBenchmarkExposureLimit(benchmark: DailyBar[], config: RoughBacktestConfig): number {
   if (benchmark.length < 120) return 0;
   const closes = benchmark.map((bar) => bar.close);
@@ -342,8 +404,34 @@ export function calculateBenchmarkExposureLimit(benchmark: DailyBar[], config: R
   return config.maxExposurePct;
 }
 
-function benchmarkMaxExposure(benchmark: DailyBar[], config: RoughBacktestConfig): number {
-  return calculateBenchmarkExposureLimit(benchmark, config);
+export function calculateRiskManagedExposureLimit(
+  benchmark: DailyBar[],
+  config: RoughBacktestConfig,
+  portfolioDrawdownPct: number
+): number {
+  const trendLimit = calculateBenchmarkExposureLimit(benchmark, config);
+  if (trendLimit <= 0) return 0;
+
+  const targetVolatility = config.volatilityTargetPct ?? 18;
+  const minVolatilityFactor = config.minVolatilityExposureFactor ?? 0.55;
+  const realizedVolatility = realizedAnnualizedVolatilityPct(benchmark);
+  const volatilityFactor =
+    targetVolatility > 0 && realizedVolatility > targetVolatility
+      ? clamp(targetVolatility / realizedVolatility, minVolatilityFactor, 1)
+      : 1;
+
+  let limit = round(trendLimit * volatilityFactor);
+  const softDrawdown = config.drawdownSoftPct ?? 8;
+  const hardDrawdown = config.drawdownHardPct ?? 12;
+  const crisisDrawdown = config.drawdownCrisisPct ?? 18;
+  if (portfolioDrawdownPct >= crisisDrawdown) return 0;
+  if (portfolioDrawdownPct >= hardDrawdown) limit = Math.min(limit, config.drawdownHardExposurePct ?? 25);
+  else if (portfolioDrawdownPct >= softDrawdown) limit = Math.min(limit, config.drawdownSoftExposurePct ?? 50);
+  return round(limit);
+}
+
+function benchmarkMaxExposure(benchmark: DailyBar[], config: RoughBacktestConfig, portfolioDrawdownPct: number): number {
+  return calculateRiskManagedExposureLimit(benchmark, config, portfolioDrawdownPct);
 }
 
 export function calculateRoughPositionSize(input: RoughPositionSizingInput): RoughPositionSizing {
@@ -399,39 +487,110 @@ export function runMonteCarloFromClosedTrades(
   options: RoughMonteCarloOptions
 ): RoughMonteCarloResult {
   const rng = createRng(options.seed);
+  const iterations = Math.max(1, Math.floor(options.iterations));
+  const samplingMode = options.samplingMode ?? "bootstrap_with_replacement";
+  const retainedPathCount = Math.max(0, Math.floor(options.retainedPathCount ?? 120));
+  const pathPointCount = Math.max(2, Math.floor(options.pathPointCount ?? 80));
+  const ruinThreshold = round(options.initialCapital * ((options.ruinThresholdPct ?? 25) / 100));
   const finalAssets: number[] = [];
   const drawdowns: number[] = [];
+  const losingStreaks: number[] = [];
+  const checkpoints = buildMonteCarloCheckpoints(trades.length, pathPointCount);
+  const checkpointValues = checkpoints.map((): number[] => []);
+  const samplePaths: MonteCarloSamplePath[] = [];
   if (trades.length === 0) {
     return {
-      iterations: options.iterations,
+      iterations,
       tradeSamplesPerRun: 0,
+      samplingMode,
       finalAssets: quantiles([options.initialCapital]),
       maxDrawdownPct: quantiles([0]),
+      longestLosingStreak: quantiles([0]),
+      profitableScenarioPct: 0,
+      bustedScenarioPct: 0,
+      ruinThreshold,
+      pathPercentiles: [{ tradeIndex: 0, ...quantiles([options.initialCapital]) }],
+      samplePaths: [],
       lossProbabilityPct: 0,
       severeDrawdownProbabilityPct: 0
     };
   }
 
-  for (let index = 0; index < options.iterations; index += 1) {
+  for (let index = 0; index < iterations; index += 1) {
     let assets = options.initialCapital;
     const path = [assets];
+    let currentLosingStreak = 0;
+    let longestLosingStreak = 0;
+    const sampleOrder =
+      samplingMode === "shuffle_without_replacement" ? shuffledTrades(trades, rng) : Array.from({ length: trades.length }, () => trades[Math.floor(rng() * trades.length)]);
     for (let tradeIndex = 0; tradeIndex < trades.length; tradeIndex += 1) {
-      const sample = trades[Math.floor(rng() * trades.length)];
+      const sample = sampleOrder[tradeIndex];
       assets *= 1 + (sample.positionPct / 100) * (sample.returnPct / 100);
       path.push(assets);
+      if (sample.returnPct < 0) {
+        currentLosingStreak += 1;
+        longestLosingStreak = Math.max(longestLosingStreak, currentLosingStreak);
+      } else {
+        currentLosingStreak = 0;
+      }
     }
-    finalAssets.push(round(assets));
-    drawdowns.push(maxDrawdownFromAssets(path));
+    const roundedFinalAssets = round(assets);
+    const maxDrawdownPct = maxDrawdownFromAssets(path);
+    finalAssets.push(roundedFinalAssets);
+    drawdowns.push(maxDrawdownPct);
+    losingStreaks.push(longestLosingStreak);
+    checkpoints.forEach((checkpoint, checkpointIndex) => {
+      checkpointValues[checkpointIndex].push(round(path[checkpoint] ?? assets));
+    });
+    if (samplePaths.length < retainedPathCount) {
+      samplePaths.push({
+        scenario: index + 1,
+        finalAssets: roundedFinalAssets,
+        maxDrawdownPct,
+        longestLosingStreak,
+        points: checkpoints.map((checkpoint) => ({
+          tradeIndex: checkpoint,
+          assets: round(path[checkpoint] ?? assets)
+        }))
+      });
+    }
   }
 
   return {
-    iterations: options.iterations,
+    iterations,
     tradeSamplesPerRun: trades.length,
+    samplingMode,
     finalAssets: quantiles(finalAssets),
     maxDrawdownPct: quantiles(drawdowns),
+    longestLosingStreak: quantiles(losingStreaks),
+    profitableScenarioPct: round((finalAssets.filter((value) => value >= options.initialCapital).length / finalAssets.length) * 100),
+    bustedScenarioPct: round((finalAssets.filter((value) => value < ruinThreshold).length / finalAssets.length) * 100),
+    ruinThreshold,
+    pathPercentiles: checkpoints.map((checkpoint, index) => ({ tradeIndex: checkpoint, ...quantiles(checkpointValues[index]) })),
+    samplePaths,
     lossProbabilityPct: round((finalAssets.filter((value) => value < options.initialCapital).length / finalAssets.length) * 100),
     severeDrawdownProbabilityPct: round((drawdowns.filter((value) => value >= 30).length / drawdowns.length) * 100)
   };
+}
+
+function shuffledTrades(trades: RoughClosedTrade[], rng: () => number): RoughClosedTrade[] {
+  const result = [...trades];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(rng() * (index + 1));
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+  return result;
+}
+
+function buildMonteCarloCheckpoints(tradeCount: number, targetPointCount: number): number[] {
+  if (tradeCount <= 0) return [0];
+  if (tradeCount <= targetPointCount) return Array.from({ length: tradeCount + 1 }, (_, index) => index);
+  const points = new Set<number>([0, tradeCount]);
+  const intervals = Math.max(1, targetPointCount - 1);
+  for (let index = 1; index < intervals; index += 1) {
+    points.add(Math.round((tradeCount * index) / intervals));
+  }
+  return [...points].sort((left, right) => left - right);
 }
 
 export function runRoughBacktest(input: {
@@ -513,7 +672,8 @@ export function runRoughBacktest(input: {
 
     const currentMarketValue = marketValue(holdings, quoteFor);
     const totalAssetsBeforeBuys = round(cash + currentMarketValue);
-    const maxExposurePct = benchmarkMaxExposure(input.benchmarkBars.slice(0, benchmarkEndIndex + 1), config);
+    const currentDrawdownPct = peakAssets > 0 ? round(((peakAssets - totalAssetsBeforeBuys) / peakAssets) * 100) : 0;
+    const maxExposurePct = benchmarkMaxExposure(input.benchmarkBars.slice(0, benchmarkEndIndex + 1), config, currentDrawdownPct);
     const heldSymbols = new Set(holdings.map((holding) => holding.symbol));
     const candidates: Candidate[] = [];
 

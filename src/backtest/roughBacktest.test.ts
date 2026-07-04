@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateBenchmarkExposureLimit,
+  calculateRiskManagedExposureLimit,
   calculateRoughPositionSize,
   runMonteCarloFromClosedTrades,
   type RoughBacktestConfig,
@@ -149,6 +150,29 @@ describe("rough backtest position sizing", () => {
     expect(calculateBenchmarkExposureLimit(weakBars, config)).toBe(0);
     expect(calculateBenchmarkExposureLimit(strongBars, { ...config, strongTrendExposurePct: 90 })).toBe(90);
   });
+
+  it("cuts new exposure when portfolio drawdown enters V4 control bands", () => {
+    const strongBars = Array.from({ length: 130 }, (_, index) => ({
+      date: `2020-01-${String(index + 1).padStart(2, "0")}`,
+      open: 100 + index * 0.4,
+      close: 100 + index * 0.4,
+      high: 101 + index * 0.4,
+      low: 99 + index * 0.4,
+      volume: 1_000_000,
+      amount: 100_000_000,
+      amplitudePct: 2,
+      changePct: 0,
+      changeAmount: 0,
+      turnoverRate: 1
+    }));
+
+    const v4Config = { ...config, strongTrendExposurePct: 90, drawdownSoftPct: 8, drawdownHardPct: 12, drawdownCrisisPct: 18 };
+
+    expect(calculateRiskManagedExposureLimit(strongBars, v4Config, 0)).toBe(90);
+    expect(calculateRiskManagedExposureLimit(strongBars, v4Config, 9)).toBe(50);
+    expect(calculateRiskManagedExposureLimit(strongBars, v4Config, 13)).toBe(25);
+    expect(calculateRiskManagedExposureLimit(strongBars, v4Config, 19)).toBe(0);
+  });
 });
 
 describe("rough monte carlo", () => {
@@ -169,5 +193,31 @@ describe("rough monte carlo", () => {
     expect(result.finalAssets.p50).toBeGreaterThan(200_000);
     expect(result.lossProbabilityPct).toBeGreaterThanOrEqual(0);
     expect(result.lossProbabilityPct).toBeLessThanOrEqual(100);
+  });
+
+  it("can run no-replacement path simulations with equity curves and losing streaks", () => {
+    const trades: RoughClosedTrade[] = [
+      { symbol: "000001", entryDate: "2020-01-01", exitDate: "2020-02-01", returnPct: 10, positionPct: 50, pnl: 10_000 },
+      { symbol: "000002", entryDate: "2020-03-01", exitDate: "2020-04-01", returnPct: -5, positionPct: 50, pnl: -5_000 },
+      { symbol: "000003", entryDate: "2020-05-01", exitDate: "2020-06-01", returnPct: -4, positionPct: 50, pnl: -4_000 },
+      { symbol: "000004", entryDate: "2020-07-01", exitDate: "2020-08-01", returnPct: 8, positionPct: 50, pnl: 8_000 }
+    ];
+
+    const result = runMonteCarloFromClosedTrades(trades, {
+      initialCapital: 200_000,
+      iterations: 100,
+      seed: 9,
+      samplingMode: "shuffle_without_replacement",
+      retainedPathCount: 5
+    });
+
+    expect(result.samplingMode).toBe("shuffle_without_replacement");
+    expect(result.tradeSamplesPerRun).toBe(4);
+    expect(result.finalAssets.p5).toBe(result.finalAssets.p95);
+    expect(result.pathPercentiles[0]).toMatchObject({ tradeIndex: 0, p50: 200_000 });
+    expect(result.pathPercentiles[result.pathPercentiles.length - 1]?.tradeIndex).toBe(4);
+    expect(result.longestLosingStreak.p95).toBeGreaterThanOrEqual(2);
+    expect(result.samplePaths.length).toBeLessThanOrEqual(5);
+    expect(result.samplePaths[0].points).toHaveLength(5);
   });
 });

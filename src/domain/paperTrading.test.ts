@@ -279,7 +279,7 @@ describe("paper trading auto plan", () => {
     expect(result.review.decisions).toContain("本轮没有符合硬性交易规则的标的，未强行建仓。");
   });
 
-  it("opens small B-grade trial positions when only the buy confirmation is missing", () => {
+  it("keeps B-grade trial candidates in observation instead of opening positions", () => {
     const nearBreakoutRules = trialCandidate().rules?.map((item) =>
       item.id === "buy.breakout" ? { ...item, actual: "偏离-1.2% / 量比0.97" } : item
     );
@@ -291,10 +291,14 @@ describe("paper trading auto plan", () => {
       tradedAt: "2026-06-09T15:10:00.000Z"
     });
 
-    expect(result.trades).toHaveLength(1);
-    expect(result.trades[0]).toMatchObject({ side: "buy", symbol: "603259", quantity: 300, price: 20 });
-    expect(result.trades[0].reason).toContain("B级试错");
-    expect(summarizePaperAccount(result.account, { "603259": 20 }).exposurePct).toBe(3);
+    expect(result.trades).toEqual([]);
+    expect(result.candidateDecisions[0]).toMatchObject({
+      symbol: "603259",
+      grade: "B",
+      action: "skip",
+      reason: "V4 disabled B-grade trial buys"
+    });
+    expect(summarizePaperAccount(result.account, { "603259": 20 }).exposurePct).toBe(0);
   });
 
   it("explains why a B-grade trial candidate was not bought", () => {
@@ -314,7 +318,7 @@ describe("paper trading auto plan", () => {
       symbol: "600777",
       grade: "B",
       action: "skip",
-      reason: "计划金额低于5000"
+      reason: "V4 disabled B-grade trial buys"
     });
   });
 
@@ -367,7 +371,7 @@ describe("paper trading auto plan", () => {
     expect(result.trades).toEqual([]);
   });
 
-  it("caps B-grade trial exposure at ten percent even with many trial candidates", () => {
+  it("does not allocate the old B-grade trial exposure budget", () => {
     const nearBreakoutRules = trialCandidate().rules?.map((item) =>
       item.id === "buy.breakout" ? { ...item, actual: "偏离-1.2% / 量比0.97" } : item
     );
@@ -382,8 +386,9 @@ describe("paper trading auto plan", () => {
     const quotes = Object.fromEntries(result.account.holdings.map((holding) => [holding.symbol, 20]));
     const summary = summarizePaperAccount(result.account, quotes);
 
-    expect(result.trades.length).toBeGreaterThan(0);
-    expect(summary.exposurePct).toBeLessThanOrEqual(10);
+    expect(result.trades).toEqual([]);
+    expect(summary.exposurePct).toBe(0);
+    expect(result.candidateDecisions.every((item) => item.reason === "V4 disabled B-grade trial buys")).toBe(true);
   });
 
   it("sizes A-grade simulated buys from the stop distance instead of a fixed percentage", () => {

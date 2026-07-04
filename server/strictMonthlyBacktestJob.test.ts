@@ -102,8 +102,15 @@ describe("strict monthly backtest job report", () => {
     const monteCarlo = {
       iterations: 5000,
       tradeSamplesPerRun: 80,
+      samplingMode: "shuffle_without_replacement",
       finalAssets: { p5: 180_000, p25: 230_000, p50: 280_000, p75: 350_000, p95: 480_000 },
       maxDrawdownPct: { p5: 8, p25: 12, p50: 16, p75: 24, p95: 32 },
+      longestLosingStreak: { p5: 2, p25: 3, p50: 4, p75: 5, p95: 8 },
+      pathPercentiles: [
+        { tradeIndex: 0, p5: 200_000, p25: 200_000, p50: 200_000, p75: 200_000, p95: 200_000 },
+        { tradeIndex: 80, p5: 180_000, p25: 230_000, p50: 280_000, p75: 350_000, p95: 480_000 }
+      ],
+      samplePaths: [],
       lossProbabilityPct: 12,
       severeDrawdownProbabilityPct: 4
     } as StrictMonteCarloResult;
@@ -124,9 +131,12 @@ describe("strict monthly backtest job report", () => {
     });
 
     expect(markdown).toContain("Strict monthly top-pool backtest");
+    expect(markdown).toContain("V4 risk system");
     expect(markdown).toContain("Final assets: 280,000");
     expect(markdown).toContain("History failures/skips: 40");
     expect(markdown).toContain("Audit records: 1,600,000");
+    expect(markdown).toContain("Sampling mode: shuffle_without_replacement");
+    expect(markdown).toContain("Longest losing streak P95: 8");
     expect(markdown).toContain("## A/B signal comparison");
     expect(markdown).toContain("A-only");
     expect(markdown).toContain("B-only");
