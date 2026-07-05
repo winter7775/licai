@@ -5,7 +5,8 @@ import {
   handleApiRequest,
   hasPaperReviewForDate,
   paperQuotesFromSummary,
-  shouldSkipPaperTradingReview
+  shouldSkipPaperTradingReview,
+  withTimeout
 } from "./apiHandlers";
 
 function createMockResponse() {
@@ -91,6 +92,23 @@ describe("shared api handlers", () => {
     expect(result.previousCloses).toEqual({ "002179": 42.73 });
     expect(result.filledSymbols).toEqual(["002179"]);
     expect(result.missingSymbols).toEqual([]);
+  });
+
+  it("does not block paper quotes when a holding history request hangs", async () => {
+    const result = await fillMissingPaperQuotePrices(
+      ["002179"],
+      {},
+      {},
+      () => new Promise(() => {}),
+      { perSymbolTimeoutMs: 5 }
+    );
+
+    expect(result.quotes).toEqual({});
+    expect(result.missingSymbols).toEqual(["002179"]);
+  });
+
+  it("rejects long-running optional work with a timeout", async () => {
+    await expect(withTimeout(new Promise(() => {}), 5, "too slow")).rejects.toThrow("too slow");
   });
 
   it("builds paper holding quote and risk inputs for auto trading", async () => {

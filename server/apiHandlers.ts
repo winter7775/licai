@@ -40,6 +40,8 @@ const PAPER_SCAN_BATCH_SIZE = 40;
 const PAPER_SCAN_DAILY_LIMIT = 800;
 const PAPER_MARKET_CAP_TOP_PCT = 30;
 const PAPER_INITIAL_POOL_TARGET = 800;
+const PAPER_QUOTE_TIMEOUT_MS = 5_000;
+const PAPER_HISTORY_QUOTE_TIMEOUT_MS = 1_000;
 
 let spotCache: Awaited<ReturnType<typeof fetchAshareSpot>> | null = null;
 let spotCacheExpiresAt = 0;
@@ -147,6 +149,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function readJsonBody<T>(request: any): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -201,7 +215,8 @@ export async function fillMissingPaperQuotePrices(
   symbols: string[],
   quotes: Record<string, number>,
   previousClosesOrHistoryProvider: Record<string, number> | typeof fetchStockHistory = {},
-  historyProvider: typeof fetchStockHistory = fetchStockHistory
+  historyProvider: typeof fetchStockHistory = fetchStockHistory,
+  options: { perSymbolTimeoutMs?: number } = {}
 ): Promise<{ quotes: Record<string, number>; previousCloses: Record<string, number>; filledSymbols: string[]; missingSymbols: string[] }> {
   const nextQuotes = { ...quotes };
   const previousCloses = typeof previousClosesOrHistoryProvider === "function" ? {} : previousClosesOrHistoryProvider;
@@ -213,7 +228,11 @@ export async function fillMissingPaperQuotePrices(
   for (const symbol of Array.from(new Set(symbols))) {
     if (nextQuotes[symbol] && nextQuotes[symbol] > 0 && nextPreviousCloses[symbol] && nextPreviousCloses[symbol] > 0) continue;
     try {
-      const history = await resolvedHistoryProvider(symbol, 20);
+      const history = await withTimeout(
+        resolvedHistoryProvider(symbol, 20),
+        options.perSymbolTimeoutMs ?? PAPER_HISTORY_QUOTE_TIMEOUT_MS,
+        `holding history quote timed out for ${symbol}`
+      );
       const latestClose = history[history.length - 1]?.close;
       const previousClose = history[history.length - 2]?.close;
       if (latestClose && latestClose > 0) {
@@ -347,7 +366,10 @@ async function buildPortfolioResponse(options?: { forceQuote?: boolean }) {
   };
 }
 
-async function buildPaperTradingResponse(account: PaperAccount, options?: { forceQuote?: boolean }) {
+async function buildPaperTradingResponse(
+  account: PaperAccount,
+  options?: { forceQuote?: boolean; useHistoryFallback?: boolean; quoteTimeoutMs?: number }
+) {
   const warnings: string[] = [];
   let quotes: Record<string, number> = {};
   let previousCloses: Record<string, number> = {};
@@ -356,7 +378,11 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
 
   try {
     if (shouldFetchPaperQuotes(holdingSymbols)) {
-      const spot = await getSpotCached(options?.forceQuote);
+      const spot = await withTimeout(
+        getSpotCached(options?.forceQuote),
+        options?.quoteTimeoutMs ?? PAPER_QUOTE_TIMEOUT_MS,
+        "paper holding quote refresh timed out"
+      );
       quotes = paperQuotePricesFromSpot(spot.stocks, holdingSymbols);
       previousCloses = paperPreviousClosesFromSpot(spot.stocks, holdingSymbols);
     }
@@ -364,7 +390,7 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
     warnings.push(`模拟盘现价刷新失败，暂用成本价估算：${errorMessage(error)}`);
   }
 
-  if (shouldFetchPaperQuotes(holdingSymbols)) {
+  if (shouldFetchPaperQuotes(holdingSymbols) && options?.useHistoryFallback !== false) {
     const filled = await fillMissingPaperQuotePrices(holdingSymbols, quotes, previousCloses);
     quotes = filled.quotes;
     previousCloses = filled.previousCloses;
@@ -373,6 +399,11 @@ async function buildPaperTradingResponse(account: PaperAccount, options?: { forc
     }
     if (filled.missingSymbols.length > 0) {
       warnings.push(`部分持仓仍缺少行情，暂用成本价估算：${filled.missingSymbols.join(", ")}`);
+    }
+  } else if (shouldFetchPaperQuotes(holdingSymbols)) {
+    const missingSymbols = holdingSymbols.filter((symbol) => !quotes[symbol] || quotes[symbol] <= 0);
+    if (missingSymbols.length > 0) {
+      warnings.push(`持仓行情快速刷新未取全，先返回本地模拟盘数据，缺失现价暂用成本价：${missingSymbols.join(", ")}`);
     }
   }
 
@@ -620,7 +651,7 @@ async function handlePaperTradingRequest(request: any, response: any, requestUrl
   try {
     if (requestUrl.pathname === "/api/paper-trading" && request.method === "GET") {
       const account = await readPaperTradingDb(PAPER_TRADING_DB_PATH);
-      sendJson(response, 200, await buildPaperTradingResponse(account));
+      sendJson(response, 200, await buildPaperTradingResponse(account, { useHistoryFallback: false }));
       return true;
     }
 
