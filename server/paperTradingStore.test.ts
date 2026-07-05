@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -52,6 +52,58 @@ describe("paper trading store", () => {
       profitProtectionStage: "initial",
       protectedProfitPct: 0
     });
+    expect(db.trades).toHaveLength(1);
+    expect(db.cash).toBe(180000);
+  });
+
+  it("restores the last active account when the primary paper file is missing", async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "mingyuan-paper-"));
+    const filePath = path.join(tempDir, "paper-trading.json");
+    const account = applyPaperTrade(createInitialPaperAccount("2026-06-09T09:30:00.000Z"), {
+      side: "buy",
+      symbol: "600879",
+      name: "A",
+      industry: "test",
+      quantity: 1000,
+      price: 20,
+      stopPrice: 18.8,
+      takeProfitPrice: 28,
+      reason: "active account",
+      tradedAt: "2026-06-09T10:00:00.000Z"
+    });
+
+    await writePaperTradingDb(filePath, account);
+    await rm(filePath);
+
+    const db = await readPaperTradingDb(filePath);
+
+    expect(db.holdings).toHaveLength(1);
+    expect(db.trades).toHaveLength(1);
+    expect(db.cash).toBe(180000);
+  });
+
+  it("restores the last active account when the primary paper file was reset to an empty initial account", async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "mingyuan-paper-"));
+    const filePath = path.join(tempDir, "paper-trading.json");
+    const account = applyPaperTrade(createInitialPaperAccount("2026-06-09T09:30:00.000Z"), {
+      side: "buy",
+      symbol: "600879",
+      name: "A",
+      industry: "test",
+      quantity: 1000,
+      price: 20,
+      stopPrice: 18.8,
+      takeProfitPrice: 28,
+      reason: "active account",
+      tradedAt: "2026-06-09T10:00:00.000Z"
+    });
+
+    await writePaperTradingDb(filePath, account);
+    await writeFile(filePath, `${JSON.stringify(createInitialPaperAccount("2026-07-05T02:00:00.000Z"), null, 2)}\n`, "utf-8");
+
+    const db = await readPaperTradingDb(filePath);
+
+    expect(db.holdings).toHaveLength(1);
     expect(db.trades).toHaveLength(1);
     expect(db.cash).toBe(180000);
   });

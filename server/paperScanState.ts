@@ -141,18 +141,50 @@ export function markPaperScanError(state: PaperScanState, message: string): Pape
   };
 }
 
+function normalizeScanState(parsed: PaperScanState): PaperScanState {
+  const candidates = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+  const updatedAt = parsed.updatedAt ?? new Date().toISOString();
+  return {
+    ...parsed,
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+    candidates,
+    attribution: parsed.attribution ?? buildPaperAttribution(candidates, updatedAt),
+    updatedAt
+  };
+}
+
+function hasMatchingPolicy(parsed: PaperScanState, expected: PaperScanState): boolean {
+  return (
+    parsed.scanPolicy?.strategyVersion === expected.scanPolicy.strategyVersion &&
+    parsed.scanPolicy?.marketCapTopPct === expected.scanPolicy.marketCapTopPct &&
+    parsed.scanPolicy?.initialPoolTarget === expected.scanPolicy.initialPoolTarget
+  );
+}
+
+function isUsableMarketUniverse(state: PaperScanState): boolean {
+  return state.universeCount === 0 || state.universeCount >= 1000;
+}
+
+function hasReusableScanResult(state: PaperScanState): boolean {
+  return state.status === "complete" && state.analyzedCount > 0 && isUsableMarketUniverse(state);
+}
+
+function withCachedScanWarning(state: PaperScanState, fallbackDate: string): PaperScanState {
+  return {
+    ...state,
+    warnings: uniqueWarnings([`cached previous scan ${state.date}; current date ${fallbackDate} has no completed scan yet`, ...state.warnings])
+  };
+}
+
 export async function readPaperScanState(filePath: string, fallback: CreatePaperScanStateInput): Promise<PaperScanState> {
   try {
-    const parsed = JSON.parse(await readFile(filePath, "utf8")) as PaperScanState;
+    const parsed = normalizeScanState(JSON.parse(await readFile(filePath, "utf8")) as PaperScanState);
     const expected = createPaperScanState(fallback);
-    if (
-      parsed.date === fallback.date &&
-      parsed.scanPolicy?.strategyVersion === expected.scanPolicy.strategyVersion &&
-      parsed.scanPolicy?.marketCapTopPct === expected.scanPolicy.marketCapTopPct &&
-      parsed.scanPolicy?.initialPoolTarget === expected.scanPolicy.initialPoolTarget &&
-      (parsed.universeCount === 0 || parsed.universeCount >= 1000)
-    ) {
+    if (parsed.date === fallback.date && hasMatchingPolicy(parsed, expected) && isUsableMarketUniverse(parsed)) {
       return parsed;
+    }
+    if (hasMatchingPolicy(parsed, expected) && hasReusableScanResult(parsed)) {
+      return withCachedScanWarning(parsed, fallback.date);
     }
   } catch {
     // Missing or stale scan state starts a new daily pass.

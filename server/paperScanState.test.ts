@@ -1,6 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { createPaperScanState, markPaperScanError, mergePaperScanBatch } from "./paperScanState";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it } from "vitest";
+import { createPaperScanState, markPaperScanError, mergePaperScanBatch, readPaperScanState, writePaperScanState } from "./paperScanState";
 import type { LiveScanResponse } from "./eastmoneyProvider";
+
+let tempDir: string | null = null;
+
+afterEach(async () => {
+  if (tempDir) {
+    await rm(tempDir, { recursive: true, force: true });
+    tempDir = null;
+  }
+});
 
 function batch(overrides: Partial<LiveScanResponse> = {}): LiveScanResponse {
   return {
@@ -181,5 +193,32 @@ describe("paper background scan state", () => {
     expect(next.status).toBe("error");
     expect(next.cursor).toBe(0);
     expect(next.warnings[0]).toContain("seed data");
+  });
+
+  it("keeps the last successful scan visible when the current day has no new pass yet", async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "mingyuan-paper-scan-"));
+    const filePath = path.join(tempDir, "paper-scan-state.json");
+    const previous = createPaperScanState({
+      date: "2026-07-03",
+      batchSize: 40,
+      dailyLimit: 40,
+      now: "2026-07-03T07:00:00.000Z"
+    });
+    const complete = mergePaperScanBatch(previous, batch({ prefilteredCount: 40 }), 40);
+    await writePaperScanState(filePath, complete);
+
+    const loaded = await readPaperScanState(filePath, {
+      date: "2026-07-05",
+      batchSize: 40,
+      dailyLimit: 800,
+      marketCapTopPct: 30,
+      initialPoolTarget: 800,
+      now: "2026-07-05T02:00:00.000Z"
+    });
+
+    expect(loaded.date).toBe("2026-07-03");
+    expect(loaded.status).toBe("complete");
+    expect(loaded.candidates).toHaveLength(1);
+    expect(loaded.warnings.some((warning) => warning.includes("cached previous scan"))).toBe(true);
   });
 });

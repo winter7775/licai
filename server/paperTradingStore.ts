@@ -66,22 +66,83 @@ function normalizePaperAccount(input: Partial<PaperAccount>): PaperAccount {
   };
 }
 
+function recoveryBackupPath(filePath: string): string {
+  return filePath.endsWith(".json") ? filePath.replace(/\.json$/, ".backup.json") : `${filePath}.backup`;
+}
+
+function hasPaperActivity(account: PaperAccount): boolean {
+  return account.holdings.length > 0 || account.trades.length > 0 || account.reviews.length > 0;
+}
+
+function isEmptyInitialAccount(account: PaperAccount): boolean {
+  return (
+    account.holdings.length === 0 &&
+    account.trades.length === 0 &&
+    account.reviews.length === 0 &&
+    account.initialCapital === 200000 &&
+    account.cash === 200000
+  );
+}
+
+async function readPaperAccountFile(filePath: string): Promise<PaperAccount> {
+  const text = await readFile(filePath, "utf-8");
+  return normalizePaperAccount(JSON.parse(text) as Partial<PaperAccount>);
+}
+
+async function writePaperAccountFile(filePath: string, account: PaperAccount): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(account, null, 2)}\n`, "utf-8");
+}
+
+async function readRecoveryBackup(filePath: string): Promise<PaperAccount | null> {
+  try {
+    const backup = await readPaperAccountFile(recoveryBackupPath(filePath));
+    return hasPaperActivity(backup) ? backup : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeRecoveryBackup(filePath: string, account: PaperAccount): Promise<void> {
+  if (!hasPaperActivity(account)) return;
+  await writePaperAccountFile(recoveryBackupPath(filePath), account);
+}
+
+async function restoreRecoveryBackup(filePath: string): Promise<PaperAccount | null> {
+  const backup = await readRecoveryBackup(filePath);
+  if (!backup) return null;
+  await writePaperAccountFile(filePath, backup);
+  return backup;
+}
+
 export async function readPaperTradingDb(filePath: string): Promise<PaperAccount> {
   try {
-    const text = await readFile(filePath, "utf-8");
-    return normalizePaperAccount(JSON.parse(text) as Partial<PaperAccount>);
+    const account = await readPaperAccountFile(filePath);
+    if (isEmptyInitialAccount(account)) {
+      const restored = await restoreRecoveryBackup(filePath);
+      if (restored) return restored;
+    }
+    await writeRecoveryBackup(filePath, account);
+    return account;
   } catch (error) {
     const code = typeof error === "object" && error && "code" in error ? (error as { code?: string }).code : "";
+    const restored = await restoreRecoveryBackup(filePath);
+    if (restored) return restored;
     if (code !== "ENOENT") throw error;
     const initial = createInitialPaperAccount();
-    await writePaperTradingDb(filePath, initial);
+    await writePaperAccountFile(filePath, initial);
     return initial;
   }
 }
 
 export async function writePaperTradingDb(filePath: string, account: PaperAccount): Promise<PaperAccount> {
   const normalized = normalizePaperAccount(account);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
+  try {
+    await writeRecoveryBackup(filePath, await readPaperAccountFile(filePath));
+  } catch {
+    // Missing or unreadable primary files are handled by the main write below.
+  }
+  await writePaperAccountFile(filePath, normalized);
+  await writeRecoveryBackup(filePath, normalized);
   return normalized;
 }
