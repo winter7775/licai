@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { PaperAccount } from "../src/domain/paperTrading";
 import {
+  buildPaperTradingResponse,
   fetchPaperHoldingBars,
   fillMissingPaperQuotePrices,
   handleApiRequest,
@@ -8,6 +13,16 @@ import {
   shouldSkipPaperTradingReview,
   withTimeout
 } from "./apiHandlers";
+import { writePaperQuoteSnapshot } from "./paperQuoteStore";
+
+let tempDir = "";
+
+afterEach(async () => {
+  if (tempDir) {
+    await rm(tempDir, { recursive: true, force: true });
+    tempDir = "";
+  }
+});
 
 function createMockResponse() {
   return {
@@ -105,6 +120,56 @@ describe("shared api handlers", () => {
 
     expect(result.quotes).toEqual({});
     expect(result.missingSymbols).toEqual(["002179"]);
+  });
+
+  it("uses the last paper quote snapshot when live holding quotes time out", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "paper-api-quotes-"));
+    const snapshotPath = path.join(tempDir, "paper-quote-snapshot.json");
+    await writePaperQuoteSnapshot(snapshotPath, {
+      updatedAt: "2026-07-03T07:00:00.000Z",
+      quotes: { "002422": 44.72 },
+      previousCloses: { "002422": 43.95 }
+    });
+    const account: PaperAccount = {
+      initialCapital: 200000,
+      cash: 195000,
+      holdings: [
+        {
+          symbol: "002422",
+          name: "科伦药业",
+          industry: "医药",
+          quantity: 100,
+          avgCost: 37.31,
+          initialStopPrice: 36.94,
+          stopPrice: 36.94,
+          highestPriceSinceEntry: 44.72,
+          takeProfitPrice: 52.23,
+          openedAt: "2026-07-01T07:00:00.000Z",
+          updatedAt: "2026-07-01T07:00:00.000Z",
+          reason: "test"
+        }
+      ],
+      trades: [],
+      reviews: [],
+      updatedAt: "2026-07-01T07:00:00.000Z"
+    };
+
+    const response = await buildPaperTradingResponse(account, {
+      quoteSnapshotPath: snapshotPath,
+      spotProvider: () => new Promise(() => {}),
+      quoteTimeoutMs: 5,
+      useHistoryFallback: false
+    });
+
+    expect(response.summary.holdings[0]).toMatchObject({
+      currentPrice: 44.72,
+      previousClose: 43.95,
+      todayPnl: 77,
+      unrealizedPnl: 741
+    });
+    expect(response.summary.totalReturn).toBe(-528);
+    expect(response.quoteStatus.mode).toBe("fallback");
+    expect(response.quoteStatus.warnings.some((warning) => warning.includes("行情快照"))).toBe(true);
   });
 
   it("rejects long-running optional work with a timeout", async () => {

@@ -27,12 +27,20 @@ import {
   writePaperScanState,
   type PaperScanState
 } from "./paperScanState";
+import {
+  buildPaperQuoteSnapshot,
+  fillQuotesFromSnapshot,
+  readPaperQuoteSnapshot,
+  writePaperQuoteSnapshot,
+  type PaperQuoteSnapshot
+} from "./paperQuoteStore";
 import { readPaperTradingDb, writePaperTradingDb } from "./paperTradingStore";
 import { readPortfolioDb, writePortfolioDb } from "./portfolioStore";
 
 const PORTFOLIO_DB_PATH = path.resolve(process.cwd(), "data/portfolio.json");
 const PAPER_TRADING_DB_PATH = path.resolve(process.cwd(), "data/paper-trading.json");
 const PAPER_SCAN_STATE_PATH = path.resolve(process.cwd(), "data/paper-scan-state.json");
+const PAPER_QUOTE_SNAPSHOT_PATH = path.resolve(process.cwd(), "data/paper-quote-snapshot.json");
 const SPOT_CACHE_TTL_MS = 60 * 1000;
 const PAPER_TRADING_HISTORY_LIMIT = 20;
 const PAPER_TRADING_DISPLAY_LIMIT = 20;
@@ -366,20 +374,31 @@ async function buildPortfolioResponse(options?: { forceQuote?: boolean }) {
   };
 }
 
-async function buildPaperTradingResponse(
+type PaperSpotProvider = (force?: boolean) => ReturnType<typeof getSpotCached>;
+
+export async function buildPaperTradingResponse(
   account: PaperAccount,
-  options?: { forceQuote?: boolean; useHistoryFallback?: boolean; quoteTimeoutMs?: number }
+  options?: {
+    forceQuote?: boolean;
+    useHistoryFallback?: boolean;
+    quoteTimeoutMs?: number;
+    quoteSnapshotPath?: string;
+    spotProvider?: PaperSpotProvider;
+  }
 ) {
   const warnings: string[] = [];
   let quotes: Record<string, number> = {};
   let previousCloses: Record<string, number> = {};
   const scanState = await readCurrentPaperScanState();
   const holdingSymbols = account.holdings.map((holding) => holding.symbol);
+  const quoteSnapshotPath = options?.quoteSnapshotPath ?? PAPER_QUOTE_SNAPSHOT_PATH;
+  const quoteSnapshot = await readPaperQuoteSnapshot(quoteSnapshotPath);
 
   try {
     if (shouldFetchPaperQuotes(holdingSymbols)) {
+      const spotProvider = options?.spotProvider ?? getSpotCached;
       const spot = await withTimeout(
-        getSpotCached(options?.forceQuote),
+        spotProvider(options?.forceQuote),
         options?.quoteTimeoutMs ?? PAPER_QUOTE_TIMEOUT_MS,
         "paper holding quote refresh timed out"
       );
@@ -388,6 +407,13 @@ async function buildPaperTradingResponse(
     }
   } catch (error) {
     warnings.push(`模拟盘现价刷新失败，暂用成本价估算：${errorMessage(error)}`);
+  }
+
+  const snapshotFilled = fillQuotesFromSnapshot(holdingSymbols, quotes, previousCloses, quoteSnapshot);
+  quotes = snapshotFilled.quotes;
+  previousCloses = snapshotFilled.previousCloses;
+  if (snapshotFilled.filledSymbols.length > 0) {
+    warnings.push(`持仓实时行情不可用，已沿用最近一次有效行情快照估值：${snapshotFilled.filledSymbols.join(", ")}`);
   }
 
   if (shouldFetchPaperQuotes(holdingSymbols) && options?.useHistoryFallback !== false) {
@@ -408,6 +434,7 @@ async function buildPaperTradingResponse(
   }
 
   const refreshedAt = new Date().toISOString();
+  await persistPaperQuoteSnapshot(quoteSnapshotPath, holdingSymbols, quotes, previousCloses, refreshedAt, quoteSnapshot, warnings);
   const refreshedAccount = refreshPaperAccountRisk(account, quotes, {}, refreshedAt);
 
   return {
@@ -420,6 +447,25 @@ async function buildPaperTradingResponse(
     },
     scanState
   };
+}
+
+async function persistPaperQuoteSnapshot(
+  filePath: string,
+  symbols: string[],
+  quotes: Record<string, number>,
+  previousCloses: Record<string, number>,
+  updatedAt: string,
+  existing: PaperQuoteSnapshot | null,
+  warnings: string[]
+) {
+  if (symbols.length === 0) return;
+  const snapshot = buildPaperQuoteSnapshot(symbols, quotes, previousCloses, updatedAt, existing);
+  if (Object.keys(snapshot.quotes).length === 0) return;
+  try {
+    await writePaperQuoteSnapshot(filePath, snapshot);
+  } catch (error) {
+    warnings.push(`行情快照保存失败：${errorMessage(error)}`);
+  }
 }
 
 export function hasPaperReviewForDate(account: PaperAccount, date: string): boolean {
@@ -651,7 +697,7 @@ async function handlePaperTradingRequest(request: any, response: any, requestUrl
   try {
     if (requestUrl.pathname === "/api/paper-trading" && request.method === "GET") {
       const account = await readPaperTradingDb(PAPER_TRADING_DB_PATH);
-      sendJson(response, 200, await buildPaperTradingResponse(account, { useHistoryFallback: false }));
+      sendJson(response, 200, await buildPaperTradingResponse(account, { quoteTimeoutMs: 2_000 }));
       return true;
     }
 
