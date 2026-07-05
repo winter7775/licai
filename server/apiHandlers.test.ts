@@ -122,6 +122,33 @@ describe("shared api handlers", () => {
     expect(result.missingSymbols).toEqual(["002179"]);
   });
 
+  it("starts missing paper holding history requests in parallel", async () => {
+    const calls: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const resultPromise = fillMissingPaperQuotePrices(["002179", "600961"], {}, async (symbol) => {
+      calls.push(symbol);
+      if (symbol === "002179") {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return [
+        { date: "2026-07-02", close: symbol === "002179" ? 42 : 28 },
+        { date: "2026-07-03", close: symbol === "002179" ? 43 : 29 }
+      ] as any;
+    });
+
+    await Promise.resolve();
+
+    expect(calls).toEqual(["002179", "600961"]);
+    releaseFirst?.();
+    await expect(resultPromise).resolves.toMatchObject({
+      quotes: { "002179": 43, "600961": 29 },
+      previousCloses: { "002179": 42, "600961": 28 },
+      missingSymbols: []
+    });
+  });
+
   it("uses the last paper quote snapshot when live holding quotes time out", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "paper-api-quotes-"));
     const snapshotPath = path.join(tempDir, "paper-quote-snapshot.json");

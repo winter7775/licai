@@ -49,7 +49,7 @@ const PAPER_SCAN_DAILY_LIMIT = 800;
 const PAPER_MARKET_CAP_TOP_PCT = 30;
 const PAPER_INITIAL_POOL_TARGET = 800;
 const PAPER_QUOTE_TIMEOUT_MS = 5_000;
-const PAPER_HISTORY_QUOTE_TIMEOUT_MS = 1_000;
+const PAPER_HISTORY_QUOTE_TIMEOUT_MS = 4_000;
 
 let spotCache: Awaited<ReturnType<typeof fetchAshareSpot>> | null = null;
 let spotCacheExpiresAt = 0;
@@ -233,29 +233,43 @@ export async function fillMissingPaperQuotePrices(
   const filledSymbols: string[] = [];
   const missingSymbols: string[] = [];
 
-  for (const symbol of Array.from(new Set(symbols))) {
-    if (nextQuotes[symbol] && nextQuotes[symbol] > 0 && nextPreviousCloses[symbol] && nextPreviousCloses[symbol] > 0) continue;
-    try {
-      const history = await withTimeout(
-        resolvedHistoryProvider(symbol, 20),
-        options.perSymbolTimeoutMs ?? PAPER_HISTORY_QUOTE_TIMEOUT_MS,
-        `holding history quote timed out for ${symbol}`
-      );
-      const latestClose = history[history.length - 1]?.close;
-      const previousClose = history[history.length - 2]?.close;
-      if (latestClose && latestClose > 0) {
-        if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) {
-          nextQuotes[symbol] = latestClose;
-          filledSymbols.push(symbol);
-        }
-        if (previousClose && previousClose > 0) {
-          nextPreviousCloses[symbol] = previousClose;
-        }
-      } else {
-        if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) missingSymbols.push(symbol);
+  const results = await Promise.all(
+    Array.from(new Set(symbols)).map(async (symbol) => {
+      if (nextQuotes[symbol] && nextQuotes[symbol] > 0 && nextPreviousCloses[symbol] && nextPreviousCloses[symbol] > 0) {
+        return undefined;
       }
-    } catch {
-      if (!nextQuotes[symbol] || nextQuotes[symbol] <= 0) missingSymbols.push(symbol);
+      try {
+        const history = await withTimeout(
+          resolvedHistoryProvider(symbol, 20),
+          options.perSymbolTimeoutMs ?? PAPER_HISTORY_QUOTE_TIMEOUT_MS,
+          `holding history quote timed out for ${symbol}`
+        );
+        const latestClose = history[history.length - 1]?.close;
+        const previousClose = history[history.length - 2]?.close;
+        if (latestClose && latestClose > 0) {
+          return { symbol, latestClose, previousClose, missing: false };
+        }
+        return { symbol, missing: !nextQuotes[symbol] || nextQuotes[symbol] <= 0 };
+      } catch {
+        return { symbol, missing: !nextQuotes[symbol] || nextQuotes[symbol] <= 0 };
+      }
+    })
+  );
+
+  for (const result of results) {
+    if (!result) continue;
+    if ("latestClose" in result && result.latestClose && result.latestClose > 0) {
+      if (!nextQuotes[result.symbol] || nextQuotes[result.symbol] <= 0) {
+        nextQuotes[result.symbol] = result.latestClose;
+        filledSymbols.push(result.symbol);
+      }
+      if (result.previousClose && result.previousClose > 0) {
+        nextPreviousCloses[result.symbol] = result.previousClose;
+      }
+      continue;
+    }
+    if (result.missing) {
+      missingSymbols.push(result.symbol);
     }
   }
 
