@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -5,13 +6,15 @@ import path from "node:path";
 import { buildRetailSentimentFromCycle } from "../src/domain/sentimentScoring";
 import { parsePositionBand, resolvePositionGate } from "../src/domain/positionControl";
 import type { MarketCycleSnapshot, PositionStatus } from "../src/domain/types";
+import { resolveMarketCycleWorkspace } from "./marketCycleWorkspace";
 import { resolvePythonExecutable } from "./pythonRuntime";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(SERVER_DIR, "..");
-const ROOT_DIR = path.resolve(APP_DIR, "../..");
-const SIGNALS_DIR = path.resolve(ROOT_DIR, "quant/signals");
-const MARKET_CYCLE_SCRIPT = path.resolve(ROOT_DIR, "scripts/market_cycle_position.py");
+const MARKET_CYCLE_WORKSPACE = resolveMarketCycleWorkspace({ appDir: APP_DIR });
+const ROOT_DIR = MARKET_CYCLE_WORKSPACE.rootDir;
+const SIGNALS_DIR = MARKET_CYCLE_WORKSPACE.signalsDir;
+const MARKET_CYCLE_SCRIPT = MARKET_CYCLE_WORKSPACE.scriptPath;
 const PYTHON_EXE = resolvePythonExecutable({ rootDir: ROOT_DIR });
 
 export interface PortfolioExposureSummary {
@@ -221,6 +224,9 @@ async function readCycleFile(filePath: string): Promise<RawCyclePosition> {
 }
 
 async function runMarketCycleRefresh(): Promise<string> {
+  if (!existsSync(MARKET_CYCLE_SCRIPT)) {
+    throw new Error(`market cycle refresh script not found: ${MARKET_CYCLE_SCRIPT}`);
+  }
   return await new Promise((resolve, reject) => {
     const child = spawn(PYTHON_EXE, [MARKET_CYCLE_SCRIPT], {
       cwd: ROOT_DIR,
@@ -264,7 +270,10 @@ export async function getPositionStatusResponse(
   portfolio: PortfolioExposureSummary,
   options?: { refresh?: boolean }
 ): Promise<PositionStatusResponse> {
-  const warnings: string[] = [];
+  const warnings: string[] = [...MARKET_CYCLE_WORKSPACE.warnings];
+  if (MARKET_CYCLE_WORKSPACE.source === "snapshot") {
+    warnings.push("Using git-tracked market cycle snapshot; set SHOUZHUO_MARKET_ROOT to enable cloud-side refresh.");
+  }
   let filePath = "";
   let mode: "refreshed" | "cached" = "cached";
 

@@ -73,6 +73,43 @@ npm run build
 sudo systemctl restart mingyuan-trading
 ```
 
+## Market Cycle Data Source
+
+The cloud app reads market-cycle and position-gate data in this order:
+
+1. `SHOUZHUO_MARKET_ROOT` if it points to a full Shouzhuo research workspace containing `quant/signals`.
+2. The local monorepo layout, where this app lives under `守拙_金融助理/apps/trading-system`.
+3. The git-tracked lightweight snapshot at `data/market-cycle/quant/signals`.
+
+For the current Tencent Cloud deployment, `git pull` is enough to receive the
+lightweight snapshot committed in this repo. It lets the web app and paper-trading
+job avoid the conservative cloud fallback even when the full research workspace is
+not installed on the server.
+
+If you later copy the full research workspace to the server, configure the service:
+
+```bash
+sudo systemctl edit mingyuan-trading
+```
+
+Paste:
+
+```ini
+[Service]
+Environment=SHOUZHUO_MARKET_ROOT=/opt/mingyuan/shouzhuo-research
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart mingyuan-trading
+```
+
+When the full workspace is not configured, clicking a forced market-cycle refresh
+will keep using the latest snapshot and report a warning instead of silently reading
+the wrong directory.
+
 ## systemd Service
 
 Copy the example:

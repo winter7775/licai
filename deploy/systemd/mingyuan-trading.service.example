@@ -9,6 +9,8 @@ WorkingDirectory=/opt/mingyuan/trading-system
 Environment=NODE_ENV=production
 Environment=PORT=4173
 Environment=HOST=0.0.0.0
+# Optional: set this when the full Shouzhuo research workspace exists on the server.
+# Environment=SHOUZHUO_MARKET_ROOT=/opt/mingyuan/shouzhuo-research
 ExecStart=/usr/bin/npm run start
 Restart=on-failure
 RestartSec=5

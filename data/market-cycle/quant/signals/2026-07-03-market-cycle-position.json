@@ -1,0 +1,204 @@
+{
+  "metrics": {
+    "target_date": "2026-07-03",
+    "window_start": "2025-06-24",
+    "indices": {
+      "sh": {
+        "close": 4043.64,
+        "one_year_position_pct": 75.8,
+        "one_year_high": 4242.57,
+        "one_year_high_date": "2026-05-13",
+        "drawdown_from_high_pct": -4.689,
+        "one_year_low": 3420.57,
+        "one_year_low_date": "2025-06-24",
+        "rebound_from_low_pct": 18.215,
+        "returns": {
+          "5d": 0.407,
+          "20d": -0.348,
+          "60d": 4.215,
+          "120d": 1.98,
+          "250d": 19.578
+        }
+      },
+      "sz": {
+        "close": 15597.51,
+        "one_year_position_pct": 87.4,
+        "one_year_high": 16372.5,
+        "one_year_high_date": "2026-06-22",
+        "drawdown_from_high_pct": -4.733,
+        "one_year_low": 10217.63,
+        "one_year_low_date": "2025-06-24",
+        "rebound_from_low_pct": 52.653,
+        "returns": {
+          "5d": -1.17,
+          "20d": -0.409,
+          "60d": 16.81,
+          "120d": 14.653,
+          "250d": 55.224
+        }
+      },
+      "cyb": {
+        "close": 4019.93,
+        "one_year_position_pct": 84.7,
+        "one_year_high": 4371.99,
+        "one_year_high_date": "2026-06-25",
+        "drawdown_from_high_pct": -8.053,
+        "one_year_low": 2064.13,
+        "one_year_low_date": "2025-06-24",
+        "rebound_from_low_pct": 94.752,
+        "returns": {
+          "5d": -4.155,
+          "20d": -1.686,
+          "60d": 27.633,
+          "120d": 23.961,
+          "250d": 99.24
+        }
+      },
+      "hs300": {
+        "close": 4842.17,
+        "one_year_position_pct": 81.2,
+        "one_year_high": 5059.66,
+        "one_year_high_date": "2026-06-22",
+        "drawdown_from_high_pct": -4.299,
+        "one_year_low": 3904.03,
+        "one_year_low_date": "2025-06-24",
+        "rebound_from_low_pct": 24.03,
+        "returns": {
+          "5d": -0.535,
+          "20d": -1.276,
+          "60d": 9.038,
+          "120d": 4.104,
+          "250d": 25.513
+        }
+      },
+      "zz1000": {
+        "close": 8620.79,
+        "one_year_position_pct": 87.9,
+        "one_year_high": 8955.45,
+        "one_year_high_date": "2026-05-13",
+        "drawdown_from_high_pct": -3.737,
+        "one_year_low": 6194.67,
+        "one_year_low_date": "2025-06-24",
+        "rebound_from_low_pct": 39.165,
+        "returns": {
+          "5d": 0.225,
+          "20d": 2.384,
+          "60d": 14.386,
+          "120d": 13.472,
+          "250d": 41.831
+        }
+      }
+    },
+    "turnover": {
+      "total_turnover_yi": 31824.54,
+      "ratios": {
+        "vs_5d": 0.912,
+        "vs_20d": 1.0,
+        "vs_60d": 1.091,
+        "vs_120d": 1.17,
+        "vs_250d": 1.359
+      },
+      "avg_5d_yi": 34908.95,
+      "avg_20d_yi": 31827.47,
+      "avg_60d_yi": 29171.14,
+      "avg_120d_yi": 27194.04,
+      "avg_250d_yi": 23418.17
+    },
+    "market_width": {
+      "limit_up_count": 108,
+      "limit_down_count": 19,
+      "failed_limit_up_count": 52,
+      "opened_limit_up_count": 160,
+      "limit_up_open_failure_rate": 0.325,
+      "highest_consecutive_limit": 4,
+      "top_industries": [
+        [
+          "汽车零部",
+          20
+        ],
+        [
+          "通用设备",
+          12
+        ],
+        [
+          "贵金属",
+          5
+        ],
+        [
+          "自动化设",
+          4
+        ],
+        [
+          "造纸",
+          3
+        ]
+      ]
+    },
+    "margin_change_pct": -0.25,
+    "relative_strength": {
+      "zz1000_minus_hs300_5d": 0.76,
+      "cyb_minus_sh_5d": -4.562,
+      "zz1000_minus_hs300_20d": 3.66,
+      "cyb_minus_sh_20d": -1.338,
+      "zz1000_minus_hs300_60d": 5.348,
+      "cyb_minus_sh_60d": 23.418,
+      "zz1000_minus_hs300_120d": 9.368,
+      "cyb_minus_sh_120d": 21.981,
+      "zz1000_minus_hs300_250d": 16.318,
+      "cyb_minus_sh_250d": 79.662
+    },
+    "breadth": {
+      "advancers": 3527,
+      "decliners": 1584,
+      "unchanged": 82,
+      "traded_count": 5193,
+      "advancers_ratio": 0.6792,
+      "source": "legu-market-activity",
+      "status": "ok",
+      "timestamp": "2026-07-03 15:00:00",
+      "note": "AKShare stock_market_activity_legu 日期匹配快照"
+    },
+    "advancers_ratio": 0.6792
+  },
+  "classification": {
+    "formula_version": "v2.7.1-continuity-cap",
+    "phase": "高位修复确认",
+    "cycle_anchor": "一年高位区间",
+    "composite_position_pct": 82.4,
+    "short_term_state": "高位修复确认",
+    "position_band": "防守确认",
+    "suggested_position_pct": "20%-35%",
+    "action": "维持防守仓，等待连续确认",
+    "confidence": "中",
+    "missing": [],
+    "risk_components": [
+      "宽度降温"
+    ],
+    "formula_review": [
+      "修正前问题：短线反弹对仓位影响过大，容易让波段仓位跳变。",
+      "修正后原则：一年位置决定仓位基准，短线宽度只允许小幅上修或下修。",
+      "高位区间默认不进入进攻仓；只有连续宽度确认后才允许提高上限。",
+      "涨停数明显不足、炸板率接近35%、或跌停扩散伴随涨停不足时，优先识别为高位分化。",
+      "前一日刚触发退潮风险时，即使次日宽度修复，也必须进入确认期，不能立即恢复仓位上沿。",
+      "高位锚点改为综合250日区间位置，避免上证单一位置在80%附近抖动导致大波段误切换。",
+      "新增风险优先规则：高位回落区一旦同时出现跌停扩散、炸板升高或20日趋势破位，先按退潮风险处理。",
+      "新增高位回落区锚点：综合250日区间位置跌出极高区后，不立即切成中部震荡，避免把高位下跌初段误判为中性。",
+      "新增上涨家数回填：优先采用当日 public-input，日期匹配时才采用乐咕快照，缺失时不得升为高置信。",
+      "新增风险组件拆分：上涨家数塌陷、跌停扩散、炸板偏高、趋势破位分别记录，避免单一指标误导。",
+      "连续性闸门：风险日后的第一个修复日继续维持防守仓，至少再确认1-2日后才允许提高仓位上限。"
+    ],
+    "risk_triggers": [
+      "上涨家数占比低于35%",
+      "跌停数重新扩散到20家以上",
+      "炸板率升至35%以上",
+      "放量跌破上一交易日低点或20日均线"
+    ],
+    "add_triggers": [
+      "连续2-3日上涨家数修复",
+      "跌停数维持低位",
+      "指数放量突破一年高点且不是题材单线拉升",
+      "中证1000和创业板相对沪深300继续扩散"
+    ],
+    "continuity_guard": "前一交易日为高位退潮风险，单日修复不足以恢复仓位上沿。"
+  }
+}
