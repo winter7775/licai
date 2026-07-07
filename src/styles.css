@@ -399,6 +399,45 @@ h2 {
   background: #fbfcfd;
 }
 
+.paper-diagnostics {
+  background: #fff7ed;
+  border-bottom: 1px solid #fed7aa;
+  color: #7c2d12;
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.paper-diagnostics > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-content: space-between;
+}
+
+.paper-diagnostics strong {
+  color: #9a3412;
+}
+
+.paper-diagnostics span {
+  color: #9a3412;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.paper-diagnostics ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.paper-diagnostics li {
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 4px 0;
+  word-break: break-word;
+}
+
 .scan-policy-strip {
   border-bottom: 1px solid var(--line);
   display: grid;

@@ -3,10 +3,11 @@ import { Fragment, useState } from "react";
 import type { PaperAttributionCandidate, PaperCandidateRejection } from "../domain/paperAttribution";
 import type { PaperCandidateDecision, PaperHoldingSummary, PaperTrade } from "../domain/paperTrading";
 import type { DailyBar } from "../live/marketScreener";
-import type { PaperTradingResponseDto, PaperScanStateDto } from "../live/liveTypes";
+import type { PaperTradingResponseDto, PaperScanStateDto, PositionStatusResponseDto } from "../live/liveTypes";
 
 interface PaperTradingPageProps {
   paperTrading: PaperTradingResponseDto | null;
+  positionSource?: PositionStatusResponseDto["source"] | null;
   loading: boolean;
   onRefresh: () => void;
   onRun: () => void;
@@ -362,7 +363,7 @@ function HoldingDetailV2({ holding, bars, trades }: { holding: PaperHoldingSumma
   );
 }
 
-export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRunScanBatch }: PaperTradingPageProps) {
+export function PaperTradingPage({ paperTrading, positionSource, loading, onRefresh, onRun, onRunScanBatch }: PaperTradingPageProps) {
   const [expandedCandidate, setExpandedCandidate] = useState<string | null>(null);
   const [expandedHolding, setExpandedHolding] = useState<string | null>(null);
   const [historyBySymbol, setHistoryBySymbol] = useState<Record<string, DailyBar[]>>({});
@@ -370,6 +371,7 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
   const latestReview = paperTrading?.account.reviews[0];
   const latestRun = paperTrading?.run;
   const scanState = paperTrading?.scanState;
+  const activePositionSource = positionSource ?? latestRun?.position.source ?? null;
   const attribution = scanState?.attribution;
   const policy = scanPolicy(scanState);
   const scanDenominator = Math.max(scanState?.prefilteredCount ?? policy.dailyLimit, 1);
@@ -382,6 +384,13 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
     .map((item) => candidatesBySymbol.get(item.symbol) ?? candidateFromRejection(item))
     .slice(0, 12);
   const decisions = decisionMap(paperTrading);
+  const diagnosticMessages = Array.from(
+    new Set([
+      ...(scanState?.warnings ?? []),
+      ...(paperTrading?.quoteStatus.warnings ?? []),
+      ...(activePositionSource?.warnings ?? [])
+    ].filter(Boolean))
+  ).slice(0, 8);
 
   async function ensureHistory(symbol: string) {
     if (historyBySymbol[symbol]) return;
@@ -465,6 +474,22 @@ export function PaperTradingPage({ paperTrading, loading, onRefresh, onRun, onRu
             </button>
           </div>
         </div>
+
+        {diagnosticMessages.length > 0 || activePositionSource?.file ? (
+          <div className="paper-diagnostics" data-testid="paper-diagnostics">
+            <div>
+              <strong>异常与数据来源</strong>
+              {activePositionSource?.file ? <span>{activePositionSource.file}</span> : null}
+            </div>
+            {diagnosticMessages.length > 0 ? (
+              <ul>
+                {diagnosticMessages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="scan-policy-strip" data-testid="paper-scan-policy">
           <div>

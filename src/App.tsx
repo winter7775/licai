@@ -242,6 +242,7 @@ export default function App() {
       return (
         <PaperTradingPage
           paperTrading={paperTrading}
+          positionSource={positionSource}
           loading={paperRefreshing}
           onRefresh={() => void refreshPaperTrading()}
           onRun={() => void runPaperTradingCycle()}

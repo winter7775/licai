@@ -274,4 +274,35 @@ describe("PaperTradingPage", () => {
     expect(screen.getByTestId("paper-holding-detail-600001").textContent).toContain("保护阶段");
     expect(screen.getByTestId("paper-holding-trades-600001").textContent).toContain("A级买入");
   });
+
+  it("shows scan failure warnings and market-cycle snapshot warnings on the paper page", () => {
+    const fixture = paperTradingFixture();
+    fixture.scanState = {
+      ...fixture.scanState!,
+      status: "error",
+      warnings: ["spot provider degraded to seed data", "Sina spot coverage incomplete"]
+    };
+
+    render(
+      <PaperTradingPage
+        paperTrading={fixture}
+        positionSource={{
+          mode: "cached",
+          file: "data/market-cycle/quant/signals/2026-07-03-market-cycle-position.json",
+          refreshedAt: "2026-07-07T04:00:00.000Z",
+          warnings: ["Using git-tracked market cycle snapshot; set SHOUZHUO_MARKET_ROOT to enable cloud-side refresh."]
+        }}
+        loading={false}
+        onRefresh={vi.fn()}
+        onRun={vi.fn()}
+        onRunScanBatch={vi.fn()}
+      />
+    );
+
+    const diagnostics = screen.getByTestId("paper-diagnostics");
+    expect(diagnostics.textContent).toContain("spot provider degraded to seed data");
+    expect(diagnostics.textContent).toContain("Sina spot coverage incomplete");
+    expect(diagnostics.textContent).toContain("git-tracked market cycle snapshot");
+    expect(diagnostics.textContent).toContain("2026-07-03-market-cycle-position.json");
+  });
 });
