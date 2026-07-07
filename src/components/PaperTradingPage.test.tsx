@@ -305,4 +305,36 @@ describe("PaperTradingPage", () => {
     expect(diagnostics.textContent).toContain("git-tracked market cycle snapshot");
     expect(diagnostics.textContent).toContain("2026-07-03-market-cycle-position.json");
   });
+
+  it("shows a fallback diagnostic when scan status is error but warnings are missing", () => {
+    const fixture = paperTradingFixture();
+    fixture.scanState = {
+      ...fixture.scanState!,
+      status: "error",
+      warnings: [],
+      cursor: 280,
+      analyzedCount: 276,
+      updatedAt: "2026-07-07T04:03:32.000Z"
+    };
+    fixture.quoteStatus = {
+      ...fixture.quoteStatus,
+      warnings: []
+    };
+    fixture.run = undefined;
+
+    render(
+      <PaperTradingPage
+        paperTrading={fixture}
+        loading={false}
+        onRefresh={vi.fn()}
+        onRun={vi.fn()}
+        onRunScanBatch={vi.fn()}
+      />
+    );
+
+    const diagnostics = screen.getByTestId("paper-diagnostics");
+    expect(diagnostics.textContent).toContain("扫描状态异常，但后端没有返回具体异常原因");
+    expect(diagnostics.textContent).toContain("280 / 800");
+    expect(diagnostics.textContent).toContain("276 / 800");
+  });
 });

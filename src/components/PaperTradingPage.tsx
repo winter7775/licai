@@ -384,13 +384,23 @@ export function PaperTradingPage({ paperTrading, positionSource, loading, onRefr
     .map((item) => candidatesBySymbol.get(item.symbol) ?? candidateFromRejection(item))
     .slice(0, 12);
   const decisions = decisionMap(paperTrading);
+  const diagnosticSeed = [
+    ...(scanState?.warnings ?? []),
+    ...(paperTrading?.quoteStatus.warnings ?? []),
+    ...(activePositionSource?.warnings ?? [])
+  ].filter(Boolean);
+  if (scanState?.status === "error") {
+    if (diagnosticSeed.length === 0) {
+      diagnosticSeed.push("扫描状态异常，但后端没有返回具体异常原因；请检查后端 scanState.warnings 写入链路。");
+    }
+    diagnosticSeed.push(
+      `扫描进度：${count(scanState.cursor)} / ${count(scanState.prefilteredCount || policy.dailyLimit)}；已分析：${count(scanState.analyzedCount)} / ${count(scanState.prefilteredCount || policy.dailyLimit)}；更新时间：${timeText(scanState.updatedAt)}。`
+    );
+  }
   const diagnosticMessages = Array.from(
-    new Set([
-      ...(scanState?.warnings ?? []),
-      ...(paperTrading?.quoteStatus.warnings ?? []),
-      ...(activePositionSource?.warnings ?? [])
-    ].filter(Boolean))
+    new Set(diagnosticSeed)
   ).slice(0, 8);
+  const shouldShowDiagnostics = scanState?.status === "error" || diagnosticMessages.length > 0 || Boolean(activePositionSource?.file);
 
   async function ensureHistory(symbol: string) {
     if (historyBySymbol[symbol]) return;
@@ -475,7 +485,7 @@ export function PaperTradingPage({ paperTrading, positionSource, loading, onRefr
           </div>
         </div>
 
-        {diagnosticMessages.length > 0 || activePositionSource?.file ? (
+        {shouldShowDiagnostics ? (
           <div className="paper-diagnostics" data-testid="paper-diagnostics">
             <div>
               <strong>异常与数据来源</strong>
