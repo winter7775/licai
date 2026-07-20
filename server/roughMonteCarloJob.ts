@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchBenchmarkHistory, fetchSpotForScreen, fetchStockHistory, type SpotProviderMode } from "./eastmoneyProvider";
+import { runWithOperationLock } from "./operationLock";
 import { prefilterSpotStocks, selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/live/marketScreener";
 import {
   runMonteCarloFromClosedTrades,
@@ -278,7 +279,7 @@ export async function runRoughMonteCarloJob(): Promise<{
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runRoughMonteCarloJob()
+  runWithOperationLock("rough-monte-carlo", () => runRoughMonteCarloJob())
     .then((result) => {
       process.stdout.write(
         JSON.stringify(

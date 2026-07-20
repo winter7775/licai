@@ -16,6 +16,9 @@ describe("production deployment workflow", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("group: mingyuan-production");
     expect(workflow).toContain("cancel-in-progress: false");
+    expect(workflow).toContain("queue: max");
+    expect(workflow).toContain("actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683");
+    expect(workflow).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
     expect(workflow).toContain("npm ci");
     expect(workflow).toContain("npm test -- --run");
     expect(workflow).toContain("npm run build");
@@ -46,11 +49,14 @@ describe("production deployment workflow", () => {
     expect(privateKeySecretIndex).toBeGreaterThan(configureStepIndex);
   });
 
-  it("checks the public health endpoint and deployed SHA", async () => {
+  it("verifies deployment identity over SSH and public reachability separately", async () => {
     const workflow = await readWorkflow();
 
     expect(workflow).toContain("/api/live/health");
+    expect(workflow).toContain("Verify deployed identity over SSH");
+    expect(workflow).toContain("Verify public production reachability");
     expect(workflow).toContain("deployment.gitSha");
     expect(workflow).toContain("EXPECTED_SHA");
+    expect(workflow).toContain("ssh mingyuan-production");
   });
 });

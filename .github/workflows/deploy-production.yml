@@ -11,6 +11,7 @@ permissions:
 concurrency:
   group: mingyuan-production
   cancel-in-progress: false
+  queue: max
 
 jobs:
   verify-and-deploy:
@@ -21,12 +22,12 @@ jobs:
 
     steps:
       - name: Check out exact commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -88,7 +89,29 @@ jobs:
           ssh -o StrictHostKeyChecking=yes mingyuan-production \
             "chmod 700 '$REMOTE_SCRIPT' && bash '$REMOTE_SCRIPT' '$GITHUB_SHA'; result=\$?; rm -f '$REMOTE_SCRIPT'; exit \$result"
 
-      - name: Verify public deployment identity
+      - name: Verify deployed identity over SSH
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 10); do
+            if payload="$(ssh mingyuan-production "curl --fail --silent --show-error --connect-timeout 5 --max-time 15 http://127.0.0.1:4173/api/live/health")"; then
+              if HEALTH_PAYLOAD="$payload" EXPECTED_SHA="$GITHUB_SHA" node -e '
+                const health = JSON.parse(process.env.HEALTH_PAYLOAD || "{}");
+                if (health.ready !== true || health.deployment?.status !== "success" || health.deployment.gitSha !== process.env.EXPECTED_SHA) {
+                  process.exit(1);
+                }
+              '; then
+                echo "Authenticated server reports expected commit $GITHUB_SHA"
+                break
+              fi
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "Authenticated server did not report expected commit $GITHUB_SHA" >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+      - name: Verify public production reachability
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
@@ -96,17 +119,17 @@ jobs:
           HEALTH_URL="http://${DEPLOY_HOST}:4173/api/live/health"
           for attempt in $(seq 1 10); do
             if payload="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "$HEALTH_URL")"; then
-              if HEALTH_PAYLOAD="$payload" EXPECTED_SHA="$GITHUB_SHA" node -e '
+              if HEALTH_PAYLOAD="$payload" node -e '
                 const health = JSON.parse(process.env.HEALTH_PAYLOAD || "{}");
-                if (health.ready !== true || health.deployment?.status !== "success" || health.deployment.gitSha !== process.env.EXPECTED_SHA) {
+                if (health.ready !== true) {
                   process.exit(1);
                 }
               '; then
-                echo "Production is healthy at $GITHUB_SHA"
+                echo "Production is publicly reachable"
                 exit 0
               fi
             fi
             sleep 3
           done
-          echo "Production health did not report expected commit $GITHUB_SHA" >&2
+          echo "Production is not publicly reachable" >&2
           exit 1

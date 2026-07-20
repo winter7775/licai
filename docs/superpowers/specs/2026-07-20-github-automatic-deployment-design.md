@@ -60,16 +60,16 @@ Create `deploy/scripts/deploy-on-server.sh`. It receives the exact Git commit SH
 
 The script must:
 
-1. Acquire an exclusive deployment lock under the application directory.
+1. Acquire the shared server-operation lock under the application directory.
 2. Verify the target is a 40-character hexadecimal Git SHA.
 3. Verify the existing checkout has no tracked local modifications.
 4. Remember the current commit for rollback.
-5. Create a timestamped compressed backup of `data/` and `.env` when present.
+5. Stop the web service and create a timestamped compressed snapshot of `data/`, `.env`, and `output/` when present.
 6. Retain a bounded number of deployment backups.
 7. Fetch the requested commit and verify it belongs to `origin/main`.
 8. Switch the checkout to that exact commit without deleting ignored runtime files.
 9. Run `npm ci` and `npm run build`.
-10. Restart `mingyuan-trading.service`.
+10. Restore the pre-deploy persistent snapshot, then restart `mingyuan-trading.service`.
 11. Wait for both `systemctl is-active` and `/api/live/health` to become healthy.
 12. Write deployment metadata and a concise deployment log.
 
@@ -84,7 +84,7 @@ These paths are runtime state and must survive every deployment:
 - `output/`
 - `backups/`
 
-The deployment may read or back up these paths but must never replace them from GitHub artifacts.
+The deployment may read or snapshot these paths but must never replace them from GitHub artifacts. The service is stopped while the snapshot is created, and the snapshot is restored after build scripts finish so dependency lifecycle scripts cannot mutate runtime trading state.
 
 The repository already ignores the main mutable paper-trading files. The deployment script adds a safety check that refuses to proceed when tracked files have local server edits, because silently discarding an uncommitted server fix would make GitHub and production diverge.
 
@@ -95,16 +95,15 @@ If dependency installation, build, restart, or health verification fails after t
 1. Record the failed target SHA and failure stage.
 2. Switch the checkout back to the remembered previous SHA.
 3. Reinstall dependencies and rebuild the previous version.
-4. Restart the service and run the health check again.
-5. Exit with failure so GitHub Actions visibly marks the deployment red.
-
-The data backup is not automatically restored because application deployment is not supposed to mutate trading state. It remains available for explicit recovery if a future schema migration requires it.
+4. Restore `data/`, `.env`, and `output/` from the pre-deploy snapshot.
+5. Restart the service and run the health check again.
+6. Exit with failure so GitHub Actions visibly marks the deployment red.
 
 If rollback itself fails, the workflow must report the failure clearly and retain all backups and logs for diagnosis.
 
 ## Backtest And Daily-Job Coordination
 
-The deployment lock prevents two releases from changing the checkout simultaneously. The script also checks for a running strict backtest or daily job before changing dependencies.
+Deployments, daily jobs, and backtests acquire the same atomic operation lock. The deployment script also checks for an older running process that predates the shared-lock implementation before changing dependencies.
 
 When one is active, the deployment waits for a bounded period. If it remains active, the release fails without changing the checkout. This protects long-running calculations and prevents `npm ci` from changing modules underneath a live job. Codex can rerun the GitHub workflow later; the user does not need to log into the server.
 
@@ -117,10 +116,11 @@ The deployment is considered successful only when all of the following are true:
 - the server checkout SHA equals the GitHub workflow SHA;
 - `mingyuan-trading.service` is active;
 - `http://127.0.0.1:4173/api/live/health` returns HTTP 200;
+- the exact deployed SHA is confirmed through the host-key-pinned SSH connection;
 - the public endpoint `http://159.75.41.16:4173/api/live/health` returns HTTP 200 from the GitHub runner;
 - deployment metadata records the SHA, timestamp, previous SHA, and successful status.
 
-The public check proves that the security group and exposed application path still work, while the local check separates application failure from an external network issue.
+The SSH check proves deployment identity. The plain-HTTP public check only proves that the security group and exposed application path still work; it is not treated as an authenticated identity check.
 
 ## Documentation And Operator Flow
 

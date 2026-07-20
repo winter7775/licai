@@ -75,6 +75,10 @@ cat > "$FAKE_BIN/npm" <<'EOF'
 set -euo pipefail
 echo "npm $*" >> "$COMMAND_LOG"
 if [ "$*" = "run build" ] && [ -f "$APP_DIR/FAIL_BUILD" ]; then
+  echo '{"holdings":[]}' > "$APP_DIR/data/paper-trading.json"
+  echo "corrupted-log" > "$APP_DIR/output/logs/daily.log"
+  echo "temporary-output" > "$APP_DIR/output/logs/temporary.log"
+  echo "WEWORK_WEBHOOK_URL=corrupted" > "$APP_DIR/.env"
   exit 42
 fi
 EOF
@@ -119,9 +123,13 @@ echo "dirty" >> "$APP_DIR/version.txt"
 expect_failure run_deploy "$SHA_TWO"
 git -C "$APP_DIR" checkout -- version.txt
 
-mkdir -p "$APP_DIR/.deploy/lock"
+mkdir -p "$APP_DIR/.deploy/operation.lock"
 expect_failure run_deploy "$SHA_TWO"
-rmdir "$APP_DIR/.deploy/lock"
+rmdir "$APP_DIR/.deploy/operation.lock"
+
+mkdir -p "$APP_DIR/.deploy/operation.lock"
+printf '%s\n' '{"pid":999999,"name":"stale-job","startedAt":"2000-01-01T00:00:00.000Z","token":"stale"}' \
+  > "$APP_DIR/.deploy/operation.lock/owner.json"
 
 run_deploy "$SHA_TWO"
 assert_equal "$SHA_TWO" "$(git -C "$APP_DIR" rev-parse HEAD)" "exact target SHA was not deployed"
@@ -132,6 +140,7 @@ assert_equal "$ENV_SUM" "$(sha256sum "$APP_DIR/.env" | awk '{print $1}')" ".env 
 grep -q "\"gitSha\":\"$SHA_TWO\"" "$APP_DIR/data/deployment.json" || fail "success metadata missing target SHA"
 grep -q '"status":"success"' "$APP_DIR/data/deployment.json" || fail "success metadata missing status"
 find "$APP_DIR/backups/deploy" -mindepth 1 -maxdepth 1 -type d | grep -q . || fail "deployment backup was not created"
+find "$APP_DIR/backups/deploy" -name persistent-state.tar.gz -type f | grep -q . || fail "persistent-state archive was not created"
 
 touch "$SOURCE_DIR/FAIL_BUILD"
 git -C "$SOURCE_DIR" add FAIL_BUILD
@@ -144,5 +153,8 @@ assert_equal "$SHA_TWO" "$(git -C "$APP_DIR" rev-parse HEAD)" "failed build did 
 grep -q '"status":"rolled_back"' "$APP_DIR/data/deployment.json" || fail "rollback metadata missing status"
 grep -q "\"gitSha\":\"$SHA_TWO\"" "$APP_DIR/data/deployment.json" || fail "rollback metadata missing restored SHA"
 assert_equal "$PAPER_SUM" "$(sha256sum "$APP_DIR/data/paper-trading.json" | awk '{print $1}')" "paper account changed after rollback"
+assert_equal "$OUTPUT_SUM" "$(sha256sum "$APP_DIR/output/logs/daily.log" | awk '{print $1}')" "output history changed after rollback"
+assert_equal "$ENV_SUM" "$(sha256sum "$APP_DIR/.env" | awk '{print $1}')" ".env changed after rollback"
+[ ! -e "$APP_DIR/output/logs/temporary.log" ] || fail "temporary output survived rollback"
 
 echo "deploy-on-server integration tests passed"

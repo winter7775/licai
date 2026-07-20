@@ -17,6 +17,7 @@ ACTIVE_JOB_POLL_SECONDS="${ACTIVE_JOB_POLL_SECONDS:-10}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
 HEALTH_RETRY_SECONDS="${HEALTH_RETRY_SECONDS:-3}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
+LOCK_STALE_SECONDS="${LOCK_STALE_SECONDS:-60}"
 
 if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "Deployment requires an exact 40-character Git SHA." >&2
@@ -32,17 +33,68 @@ fi
 cd "$APP_DIR"
 
 DEPLOY_STATE_DIR="$APP_DIR/.deploy"
-LOCK_DIR="$DEPLOY_STATE_DIR/lock"
+LOCK_DIR="$DEPLOY_STATE_DIR/operation.lock"
 BACKUP_ROOT="$APP_DIR/backups/deploy"
+LOCK_TOKEN="deploy-$$-$(date +%s)-${RANDOM}"
+LOCK_ACQUIRED=0
+BACKUP_DIR=""
+PERSISTENT_BACKUP=""
 mkdir -p "$DEPLOY_STATE_DIR"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "Another deployment is already running: $LOCK_DIR" >&2
-  exit 75
-fi
+lock_owner_pid() {
+  sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$LOCK_DIR/owner.json" 2>/dev/null | head -1
+}
+
+lock_is_stale() {
+  local owner_pid modified_at now
+  owner_pid="$(lock_owner_pid)"
+  if [ -n "$owner_pid" ]; then
+    if kill -0 "$owner_pid" 2>/dev/null; then
+      return 1
+    fi
+    return 0
+  fi
+
+  modified_at="$(stat -c %Y "$LOCK_DIR" 2>/dev/null || printf '0')"
+  now="$(date +%s)"
+  (( now - modified_at >= LOCK_STALE_SECONDS ))
+}
+
+acquire_operation_lock() {
+  local started_at now elapsed stale_dir
+  started_at="$(date +%s)"
+
+  while true; do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      printf '{"pid":%s,"name":"deployment","startedAt":"%s","token":"%s"}\n' \
+        "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$LOCK_TOKEN" > "$LOCK_DIR/owner.json"
+      LOCK_ACQUIRED=1
+      return 0
+    fi
+
+    if lock_is_stale; then
+      stale_dir="$DEPLOY_STATE_DIR/operation.lock.stale-$$-${RANDOM}"
+      if mv "$LOCK_DIR" "$stale_dir" 2>/dev/null; then
+        rm -rf -- "$stale_dir"
+      fi
+      continue
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - started_at))
+    if (( elapsed >= ACTIVE_JOB_WAIT_SECONDS )); then
+      echo "Another deployment, daily job, or backtest holds the operation lock: $LOCK_DIR" >&2
+      return 1
+    fi
+    echo "Waiting for the current server operation to finish..."
+    sleep "$ACTIVE_JOB_POLL_SECONDS"
+  done
+}
 
 cleanup_lock() {
-  rmdir "$LOCK_DIR" 2>/dev/null || true
+  if (( LOCK_ACQUIRED == 1 )) && grep -Fq "\"token\":\"$LOCK_TOKEN\"" "$LOCK_DIR/owner.json" 2>/dev/null; then
+    rm -rf -- "$LOCK_DIR"
+  fi
 }
 trap cleanup_lock EXIT
 
@@ -68,10 +120,6 @@ wait_for_active_jobs() {
   done
 }
 
-if ! wait_for_active_jobs; then
-  exit 75
-fi
-
 PREVIOUS_SHA="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
 DEPLOY_REF="refs/remotes/$DEPLOY_REMOTE/$DEPLOY_BRANCH"
 
@@ -89,17 +137,36 @@ if ! git merge-base --is-ancestor "$TARGET_SHA" "$DEPLOY_REF"; then
   exit 65
 fi
 
+if ! acquire_operation_lock; then
+  exit 75
+fi
+
+if ! wait_for_active_jobs; then
+  exit 75
+fi
+
 backup_persistent_state() {
-  local timestamp backup_dir
+  local timestamp
+  local -a entries=()
   timestamp="$(date -u +%Y%m%d-%H%M%S)"
   mkdir -p "$BACKUP_ROOT"
-  backup_dir="$(mktemp -d "$BACKUP_ROOT/${timestamp}-${TARGET_SHA:0:12}-XXXXXX")"
+  BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/${timestamp}-${TARGET_SHA:0:12}-XXXXXX")"
+  PERSISTENT_BACKUP="$BACKUP_DIR/persistent-state.tar.gz"
 
   if [ -d "$APP_DIR/data" ]; then
-    cp -a "$APP_DIR/data" "$backup_dir/data"
+    entries+=(data)
   fi
   if [ -f "$APP_DIR/.env" ]; then
-    cp -a "$APP_DIR/.env" "$backup_dir/.env"
+    entries+=(.env)
+  fi
+  if [ -d "$APP_DIR/output" ]; then
+    entries+=(output)
+  fi
+
+  if (( ${#entries[@]} > 0 )); then
+    tar -czf "$PERSISTENT_BACKUP" -C "$APP_DIR" "${entries[@]}"
+  else
+    tar -czf "$PERSISTENT_BACKUP" --files-from /dev/null
   fi
 
   mapfile -t old_backups < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' | sort -r)
@@ -109,6 +176,17 @@ backup_persistent_state() {
       rm -rf -- "$old_backup"
     done
   fi
+}
+
+restore_persistent_state() {
+  if [ ! -f "$PERSISTENT_BACKUP" ]; then
+    echo "Persistent-state backup is unavailable; refusing an unsafe restore." >&2
+    return 1
+  fi
+
+  rm -rf -- "$APP_DIR/data" "$APP_DIR/output"
+  rm -f -- "$APP_DIR/.env"
+  tar -xzf "$PERSISTENT_BACKUP" -C "$APP_DIR"
 }
 
 run_systemctl() {
@@ -131,11 +209,14 @@ check_health() {
   return 1
 }
 
-install_and_start() {
+install_code() {
   local sha="$1"
   git checkout --detach "$sha" || return $?
   "$NPM_BIN" ci || return $?
   "$NPM_BIN" run build || return $?
+}
+
+start_and_check() {
   run_systemctl restart "$SERVICE_NAME" || return $?
   check_health || return $?
 }
@@ -159,10 +240,19 @@ write_metadata() {
   mv "$temp_file" "$APP_DIR/data/deployment.json"
 }
 
-backup_persistent_state
+if ! run_systemctl stop "$SERVICE_NAME"; then
+  echo "Could not stop $SERVICE_NAME before taking a consistent snapshot." >&2
+  exit 1
+fi
+
+if ! backup_persistent_state; then
+  echo "Could not create the persistent-state snapshot; deployment aborted." >&2
+  run_systemctl start "$SERVICE_NAME" || true
+  exit 1
+fi
 
 echo "Deploying $TARGET_SHA (previous $PREVIOUS_SHA)..."
-if install_and_start "$TARGET_SHA"; then
+if install_code "$TARGET_SHA" && restore_persistent_state && start_and_check; then
   if write_metadata "success" "$TARGET_SHA" "$PREVIOUS_SHA"; then
     echo "Deployment succeeded: $TARGET_SHA"
     exit 0
@@ -172,8 +262,17 @@ fi
 
 deploy_exit=$?
 echo "Deployment failed; restoring $PREVIOUS_SHA..." >&2
+run_systemctl stop "$SERVICE_NAME" || true
 
-if install_and_start "$PREVIOUS_SHA"; then
+rollback_ok=1
+if ! install_code "$PREVIOUS_SHA"; then
+  rollback_ok=0
+fi
+if ! restore_persistent_state; then
+  rollback_ok=0
+fi
+
+if (( rollback_ok == 1 )) && start_and_check; then
   write_metadata "rolled_back" "$PREVIOUS_SHA"
   echo "Rollback succeeded: $PREVIOUS_SHA" >&2
 else

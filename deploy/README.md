@@ -44,9 +44,10 @@ http://SERVER_IP:4173/
 
 After the one-time setup below, every verified push to `main` deploys the exact
 Git commit to the Tencent Cloud server. The workflow runs the full test suite,
-production build, deployment-script tests, server backup, service restart, and
-both local and public health checks. A failed build or health check restores the
-previous working commit automatically.
+production build, deployment-script tests, a consistent runtime snapshot,
+service restart, and both authenticated server and public reachability checks.
+A failed build or health check restores both the previous working commit and the
+pre-deploy runtime snapshot automatically.
 
 ### 1. Create A Dedicated Deployment Key
 
@@ -78,8 +79,8 @@ sudo -n /usr/bin/systemctl status mingyuan-trading >/dev/null
 ```
 
 The last command must complete without asking for a password. The deployment
-script only needs permission to restart `mingyuan-trading`; do not expose the
-application's `.env` or Enterprise WeChat webhook.
+script only needs permission to stop, start, and restart `mingyuan-trading`; do
+not expose the application's `.env` or Enterprise WeChat webhook.
 
 ### 3. Record The Real Server Host Key
 
@@ -124,14 +125,19 @@ Normal releases require no Tencent Cloud login:
 1. Merge or push a verified commit to `main`.
 2. Open the repository's **Actions > Deploy production** page to see verification,
    deployment, rollback, and public-health status.
-3. Confirm `http://159.75.41.16:4173/api/live/health` reports the same commit in
-   `deployment.gitSha` with `deployment.status` set to `success`.
+3. Confirm the workflow's authenticated SSH check reports the exact commit and
+   the public `http://159.75.41.16:4173/api/live/health` endpoint is reachable.
 
 The workflow can also be rerun with **Run workflow** (`workflow_dispatch`) without
 changing code. A red run with `rolled_back` means the old version is serving again;
 inspect the Actions log before retrying. Runtime `data/`, `.env`, and `output/`
-remain on the server, and the ten newest pre-deploy backups are kept under
-`/opt/mingyuan/trading-system/backups/deploy/`.
+are snapshotted while the service is stopped and restored after every build, so
+package scripts cannot silently mutate them. The ten newest compressed snapshots
+are kept under `/opt/mingyuan/trading-system/backups/deploy/`.
+
+Deployments, daily jobs, and backtests share `.deploy/operation.lock`. A release
+waits while a calculation is active; a newly started calculation refuses to run
+while deployment owns the lock. Dead-process locks are recovered automatically.
 
 ## Daily Job Test
 
