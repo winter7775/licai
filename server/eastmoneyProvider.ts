@@ -32,6 +32,13 @@ const SINA_SPOT_PAGE_WORKERS = 3;
 const EASTMONEY_SPOT_PAGE_SIZE = 100;
 const EASTMONEY_SPOT_PAGE_WORKERS = 4;
 const TENCENT_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get";
+const TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q=";
+const TENCENT_HOLDING_QUOTE_ATTEMPTS = 3;
+const TENCENT_HOLDING_QUOTE_TIMEOUT_MS = 1_000;
+const TENCENT_HOLDING_QUOTE_RETRY_DELAY_MS = 150;
+export const TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS =
+  TENCENT_HOLDING_QUOTE_ATTEMPTS * TENCENT_HOLDING_QUOTE_TIMEOUT_MS +
+  TENCENT_HOLDING_QUOTE_RETRY_DELAY_MS * (1 + 2);
 const CACHE_TTL_MS = 3 * 60 * 1000;
 const SPOT_UNIVERSE_CACHE_TTL_MS = 10 * 60 * 1000;
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +101,18 @@ export interface BridgeResult {
 
 export type SpotProviderMode = "sina" | "eastmoney" | "cache";
 type HistoryProviderMode = "eastmoney" | "tencent";
+
+export interface TargetHoldingQuotes {
+  quotes: Record<string, number>;
+  previousCloses: Record<string, number>;
+}
+
+export interface TencentTargetQuote {
+  symbol: string;
+  name: string;
+  price: number;
+  previousClose: number;
+}
 
 let scanCache: { expiresAt: number; value: LiveScanResponse; key: string } | null = null;
 let spotUniverseCache: { expiresAt: number; value: Awaited<ReturnType<typeof fetchSpotForScreen>> } | null = null;
@@ -172,6 +191,75 @@ export function marketDataKey(symbol: string): { tencent: string; eastmoney: str
     tencent: `${isBeijing ? "bj" : isShanghai ? "sh" : "sz"}${normalized}`,
     eastmoney: `${isShanghai ? 1 : 0}.${normalized}`
   };
+}
+
+export function parseTencentQuotePayload(payload: string): TencentTargetQuote[] {
+  const quotes: TencentTargetQuote[] = [];
+  const pattern = /v_(?:sh|sz|bj)(\d{6})="([^"]*)"/g;
+  for (const match of payload.matchAll(pattern)) {
+    const fields = match[2].split("~");
+    const symbol = (fields[2] || match[1]).replace(/\D/g, "").padStart(6, "0").slice(-6);
+    const price = Number(fields[3]);
+    const previousClose = Number(fields[4]);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    quotes.push({
+      symbol,
+      name: fields[1] ?? "",
+      price,
+      previousClose: Number.isFinite(previousClose) && previousClose > 0 ? previousClose : 0
+    });
+  }
+  return quotes;
+}
+
+export async function fetchTencentHoldingQuotes(
+  symbols: string[],
+  fetchImpl: typeof fetch = fetch,
+  options: { attempts?: number; timeoutMs?: number; sleep?: (delayMs: number) => Promise<void> } = {}
+): Promise<TargetHoldingQuotes> {
+  const normalized = Array.from(
+    new Set(symbols.map((symbol) => symbol.replace(/\D/g, "").padStart(6, "0").slice(-6)).filter(Boolean))
+  );
+  if (normalized.length === 0) return { quotes: {}, previousCloses: {} };
+
+  const url = new URL(TENCENT_QUOTE_URL + normalized.map((symbol) => marketDataKey(symbol).tencent).join(","));
+  const attempts = Math.max(1, Math.floor(options.attempts ?? TENCENT_HOLDING_QUOTE_ATTEMPTS));
+  const timeoutMs = Math.max(100, Math.floor(options.timeoutMs ?? TENCENT_HOLDING_QUOTE_TIMEOUT_MS));
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(url, {
+        headers: {
+          Referer: "https://gu.qq.com/",
+          "User-Agent": "Mozilla/5.0 MingyuanTradingSystem/0.1"
+        },
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Tencent quote HTTP ${response.status}`);
+      const payload = new TextDecoder("gb18030").decode(await response.arrayBuffer());
+      const parsed = parseTencentQuotePayload(payload);
+      if (parsed.length === 0) throw new Error("Tencent quote response contained no usable prices");
+      return {
+        quotes: Object.fromEntries(parsed.map((quote) => [quote.symbol, quote.price])),
+        previousCloses: Object.fromEntries(
+          parsed.filter((quote) => quote.previousClose > 0).map((quote) => [quote.symbol, quote.previousClose])
+        )
+      };
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (attempt < attempts - 1) {
+      await (options.sleep ?? delay)(TENCENT_HOLDING_QUOTE_RETRY_DELAY_MS * 2 ** attempt);
+    }
+  }
+
+  throw new Error(`Tencent targeted holding quotes failed after ${attempts} attempts: ${errorText(lastError)}`);
 }
 
 export function collectBatchPayloads(results: BridgeResult[]): {

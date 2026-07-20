@@ -257,6 +257,90 @@ describe("shared api handlers", () => {
     expect(response.quoteStatus.warnings.some((warning) => warning.includes("暂用成本价"))).toBe(false);
   });
 
+  it("uses targeted holding quotes before the full-market spot provider", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "paper-api-targeted-quotes-"));
+    const account: PaperAccount = {
+      initialCapital: 200000,
+      cash: 195000,
+      holdings: [
+        {
+          symbol: "600030",
+          name: "CITIC",
+          industry: "Brokerage",
+          quantity: 100,
+          avgCost: 27,
+          initialStopPrice: 25.5,
+          stopPrice: 25.5,
+          highestPriceSinceEntry: 28,
+          takeProfitPrice: 37.8,
+          openedAt: "2026-07-17T07:00:00.000Z",
+          updatedAt: "2026-07-17T07:00:00.000Z",
+          reason: "test"
+        }
+      ],
+      trades: [],
+      reviews: [],
+      updatedAt: "2026-07-17T07:00:00.000Z"
+    };
+
+    const response = await buildPaperTradingResponse(account, {
+      quoteSnapshotPath: path.join(tempDir, "paper-quote-snapshot.json"),
+      holdingQuoteProvider: async (symbols) => {
+        expect(symbols).toEqual(["600030"]);
+        return { quotes: { "600030": 28.28 }, previousCloses: { "600030": 27.6 } };
+      },
+      spotProvider: async () => {
+        throw new Error("full-market spot provider must not be called");
+      },
+      historyProvider: async () => {
+        throw new Error("history fallback must not be called");
+      }
+    });
+
+    expect(response.summary.holdings[0]).toMatchObject({
+      currentPrice: 28.28,
+      previousClose: 27.6,
+      todayPnl: 68,
+      unrealizedPnl: 128
+    });
+    expect(response.quoteStatus).toMatchObject({ mode: "live", warnings: [] });
+  });
+
+  it("keeps targeted quotes and fills only missing holdings from daily history", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "paper-api-partial-quotes-"));
+    const historyCalls: string[] = [];
+    const account = {
+      initialCapital: 200000,
+      cash: 190000,
+      holdings: [
+        { symbol: "600030", name: "CITIC", industry: "Brokerage", quantity: 100, avgCost: 27, stopPrice: 25.5 },
+        { symbol: "000001", name: "PAB", industry: "Bank", quantity: 100, avgCost: 10, stopPrice: 9.4 }
+      ],
+      trades: [],
+      reviews: [],
+      updatedAt: "2026-07-17T07:00:00.000Z"
+    } as PaperAccount;
+
+    const response = await buildPaperTradingResponse(account, {
+      quoteSnapshotPath: path.join(tempDir, "paper-quote-snapshot.json"),
+      holdingQuoteProvider: async () => ({ quotes: { "600030": 28.28 }, previousCloses: { "600030": 27.6 } }),
+      historyProvider: async (symbol) => {
+        historyCalls.push(symbol);
+        return [
+          { date: "2026-07-17", close: 10.78 },
+          { date: "2026-07-20", close: 10.98 }
+        ] as any;
+      }
+    });
+
+    expect(historyCalls).toEqual(["000001"]);
+    expect(response.summary.holdings.map((holding) => [holding.symbol, holding.currentPrice])).toEqual([
+      ["600030", 28.28],
+      ["000001", 10.98]
+    ]);
+    expect(response.quoteStatus.mode).toBe("fallback");
+  });
+
   it("rejects long-running optional work with a timeout", async () => {
     await expect(withTimeout(new Promise(() => {}), 5, "too slow")).rejects.toThrow("too slow");
   });

@@ -14,8 +14,10 @@ import {
   fetchAshareSpot,
   fetchSpotForScreen,
   fetchStockHistory,
+  fetchTencentHoldingQuotes,
   readLiveScreenDiskCache,
   runLiveScreen,
+  TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS,
   type LiveScanResponse,
   type LiveScreenedStock
 } from "./eastmoneyProvider";
@@ -50,7 +52,7 @@ const PAPER_SCAN_BATCH_SIZE = 40;
 const PAPER_SCAN_DAILY_LIMIT = 800;
 const PAPER_MARKET_CAP_TOP_PCT = 30;
 const PAPER_INITIAL_POOL_TARGET = 800;
-const PAPER_QUOTE_TIMEOUT_MS = 5_000;
+const PAPER_QUOTE_TIMEOUT_MS = TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS + 1_000;
 const PAPER_HISTORY_QUOTE_TIMEOUT_MS = 4_000;
 
 let spotCache: Awaited<ReturnType<typeof fetchAshareSpot>> | null = null;
@@ -396,6 +398,10 @@ async function buildPortfolioResponse(options?: { forceQuote?: boolean }) {
 }
 
 type PaperSpotProvider = (force?: boolean) => ReturnType<typeof getSpotCached>;
+type PaperHoldingQuoteProvider = (symbols: string[]) => Promise<{
+  quotes: Record<string, number>;
+  previousCloses: Record<string, number>;
+}>;
 
 export async function buildPaperTradingResponse(
   account: PaperAccount,
@@ -404,6 +410,7 @@ export async function buildPaperTradingResponse(
     useHistoryFallback?: boolean;
     quoteTimeoutMs?: number;
     quoteSnapshotPath?: string;
+    holdingQuoteProvider?: PaperHoldingQuoteProvider;
     spotProvider?: PaperSpotProvider;
     historyProvider?: typeof fetchStockHistory;
   }
@@ -419,14 +426,24 @@ export async function buildPaperTradingResponse(
 
   try {
     if (shouldFetchPaperQuotes(holdingSymbols)) {
-      const spotProvider = options?.spotProvider ?? getSpotCached;
-      const spot = await withTimeout(
-        spotProvider(options?.forceQuote),
-        options?.quoteTimeoutMs ?? PAPER_QUOTE_TIMEOUT_MS,
-        "paper holding quote refresh timed out"
-      );
-      quotes = paperQuotePricesFromSpot(spot.stocks, holdingSymbols);
-      previousCloses = paperPreviousClosesFromSpot(spot.stocks, holdingSymbols);
+      if (options?.holdingQuoteProvider || !options?.spotProvider) {
+        const holdingQuoteProvider = options?.holdingQuoteProvider ?? fetchTencentHoldingQuotes;
+        const targeted = await withTimeout(
+          holdingQuoteProvider(holdingSymbols),
+          options?.quoteTimeoutMs ?? PAPER_QUOTE_TIMEOUT_MS,
+          "paper targeted holding quote refresh timed out"
+        );
+        quotes = targeted.quotes;
+        previousCloses = targeted.previousCloses;
+      } else {
+        const spot = await withTimeout(
+          options.spotProvider(options?.forceQuote),
+          options?.quoteTimeoutMs ?? PAPER_QUOTE_TIMEOUT_MS,
+          "paper holding quote refresh timed out"
+        );
+        quotes = paperQuotePricesFromSpot(spot.stocks, holdingSymbols);
+        previousCloses = paperPreviousClosesFromSpot(spot.stocks, holdingSymbols);
+      }
     }
   } catch (error) {
     spotRefreshError = errorMessage(error);
@@ -735,7 +752,7 @@ async function handlePaperTradingRequest(request: any, response: any, requestUrl
   try {
     if (requestUrl.pathname === "/api/paper-trading" && request.method === "GET") {
       const account = await readPaperTradingDb(PAPER_TRADING_DB_PATH);
-      sendJson(response, 200, await buildPaperTradingResponse(account, { quoteTimeoutMs: 2_000 }));
+      sendJson(response, 200, await buildPaperTradingResponse(account));
       return true;
     }
 

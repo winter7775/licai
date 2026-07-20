@@ -11,6 +11,9 @@ import {
   historyProviderForSpotMode,
   latestHistoryTradeDate,
   marketDataKey,
+  fetchTencentHoldingQuotes,
+  parseTencentQuotePayload,
+  TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS,
   pickTopRecommendations,
   retryFailedBatchResults,
   selectHistoryCandidates,
@@ -209,6 +212,47 @@ describe("eastmoney provider helpers", () => {
     expect(marketDataKey("920045")).toEqual({ tencent: "bj920045", eastmoney: "0.920045" });
     expect(marketDataKey("600030")).toEqual({ tencent: "sh600030", eastmoney: "1.600030" });
     expect(marketDataKey("000001")).toEqual({ tencent: "sz000001", eastmoney: "0.000001" });
+  });
+
+  it("parses targeted Tencent holding quotes for Shanghai and Beijing symbols", () => {
+    const quotes = parseTencentQuotePayload(
+      'v_sh600030="1~CITIC~600030~28.28~27.60~27.76";\n' +
+        'v_bj920045="1~BSE~920045~288.93~305.80~303.00";'
+    );
+
+    expect(quotes).toEqual([
+      { symbol: "600030", name: "CITIC", price: 28.28, previousClose: 27.6 },
+      { symbol: "920045", name: "BSE", price: 288.93, previousClose: 305.8 }
+    ]);
+  });
+
+  it("retries a transient targeted Tencent quote failure", async () => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const result = await fetchTencentHoldingQuotes(
+      ["600030"],
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("socket reset");
+        return new Response('v_sh600030="1~CITIC~600030~28.28~27.60~27.76";');
+      },
+      {
+        attempts: 2,
+        timeoutMs: 100,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        }
+      }
+    );
+
+    expect(attempts).toBe(2);
+    expect(sleeps).toEqual([150]);
+    expect(result).toEqual({ quotes: { "600030": 28.28 }, previousCloses: { "600030": 27.6 } });
+  });
+
+  it("keeps the complete targeted quote retry budget below the paper API timeout", () => {
+    expect(TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS).toBe(3_450);
+    expect(TENCENT_HOLDING_QUOTE_RETRY_BUDGET_MS).toBeLessThan(5_000);
   });
 
   it("retries only unusable history results at lower concurrency and preserves item order", async () => {
