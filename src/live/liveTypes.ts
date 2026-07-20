@@ -15,7 +15,7 @@ export interface LiveScreenedStockDto {
 }
 
 export interface LiveScanResponseDto {
-  provider: "eastmoney-public" | "sina-public" | "seed-public";
+  provider: "eastmoney-public" | "sina-public" | "cached-public";
   sourceLabel: string;
   asOf: string;
   tradeDate: string;

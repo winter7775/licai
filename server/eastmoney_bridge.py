@@ -1,4 +1,4 @@
-"""Fetch Eastmoney public JSON endpoints for the local trading-system API."""
+"""Fetch public market-data JSON endpoints for the local trading-system API."""
 
 from __future__ import annotations
 
@@ -28,18 +28,21 @@ def headers_for_url(url: str) -> dict[str, str]:
 
 def fetch_json(url: str) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(4):
+    is_eastmoney = "eastmoney.com" in url
+    attempts = 1 if is_eastmoney else 3
+    timeout = 8 if is_eastmoney else 15
+    for attempt in range(attempts):
         try:
             request = urllib.request.Request(url, headers=headers_for_url(url))
-            with urllib.request.urlopen(request, timeout=45) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return {
                     "ok": True,
                     "data": json.loads(response.read().decode("utf-8")),
                 }
         except Exception as error:  # noqa: BLE001 - returned to the local API
             last_error = error
-            if attempt < 3:
-                time.sleep(0.8 * (attempt + 1))
+            if attempt < attempts - 1:
+                time.sleep(0.25 * (attempt + 1))
     return {"ok": False, "error": str(last_error)}
 
 

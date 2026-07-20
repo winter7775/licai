@@ -16,6 +16,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { resolvePythonExecutable } from "./pythonRuntime";
+import {
+  readHistorySnapshot,
+  readSpotSnapshot,
+  writeHistorySnapshot,
+  writeSpotSnapshot,
+  type SpotSnapshot
+} from "./marketDataStore";
 
 const EASTMONEY_SPOT_URL = "https://push2.eastmoney.com/api/qt/clist/get";
 const EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
@@ -31,6 +38,8 @@ const APP_DIR = path.resolve(SERVER_DIR, "..");
 const PYTHON_EXE = resolvePythonExecutable({ rootDir: APP_DIR });
 const PYTHON_BRIDGE = path.resolve(SERVER_DIR, "eastmoney_bridge.py");
 const SCAN_CACHE_FILE = path.resolve(SERVER_DIR, "../data/live-scan-cache.json");
+const SPOT_SNAPSHOT_FILE = path.resolve(SERVER_DIR, "../data/market-data/spot-latest.json");
+const HISTORY_SNAPSHOT_DIR = path.resolve(SERVER_DIR, "../data/market-data/history");
 const DEFAULT_MARKET_CAP_TOP_PCT = 0.3;
 const DEFAULT_INITIAL_POOL_LIMIT = 400;
 const DEFAULT_CORE_POOL_LIMIT = 400;
@@ -52,7 +61,7 @@ export interface LiveScreenedStock {
 }
 
 export interface LiveScanResponse {
-  provider: "eastmoney-public" | "sina-public" | "seed-public";
+  provider: "eastmoney-public" | "sina-public" | "cached-public";
   sourceLabel: string;
   asOf: string;
   tradeDate: string;
@@ -68,6 +77,12 @@ export interface LiveScanResponse {
   durationMs: number;
   candidates: LiveScreenedStock[];
   warnings: string[];
+  dataSources?: {
+    spot: "sina-public" | "eastmoney-public" | "disk-cache";
+    history: "tencent-public" | "eastmoney-public" | "mixed" | "disk-cache";
+    historySourceCounts: Record<string, number>;
+    degraded: boolean;
+  };
 }
 
 interface BridgeResult {
@@ -76,7 +91,7 @@ interface BridgeResult {
   error?: string;
 }
 
-export type SpotProviderMode = "live" | "sina" | "seed";
+export type SpotProviderMode = "sina" | "eastmoney" | "cache";
 type HistoryProviderMode = "eastmoney" | "tencent";
 
 let scanCache: { expiresAt: number; value: LiveScanResponse; key: string } | null = null;
@@ -256,8 +271,10 @@ export function alignSpotWithLatestHistory(stock: SpotStock, history: DailyBar[]
 }
 
 export async function fetchSpotForScreen(
-  provider: () => Promise<{ total: number; stocks: SpotStock[] }> = fetchAshareSpot,
-  fallbackProvider: () => Promise<{ total: number; stocks: SpotStock[] }> = fetchSinaAshareSpot
+  provider: () => Promise<{ total: number; stocks: SpotStock[] }> = fetchSinaAshareSpot,
+  fallbackProvider: () => Promise<{ total: number; stocks: SpotStock[] }> = fetchAshareSpot,
+  snapshotReader: () => Promise<SpotSnapshot | null> = () => readSpotSnapshot(SPOT_SNAPSHOT_FILE),
+  snapshotWriter: (snapshot: SpotSnapshot) => Promise<void> = (snapshot) => writeSpotSnapshot(SPOT_SNAPSHOT_FILE, snapshot)
 ): Promise<{
   spot: { total: number; stocks: SpotStock[] };
   warnings: string[];
@@ -267,37 +284,53 @@ export async function fetchSpotForScreen(
   try {
     const spot = await provider();
     if (isCompleteSpotUniverse(spot.total, spot.stocks.length)) {
-      return { spot, warnings: [], mode: "live" };
+      const warnings: string[] = [];
+      try {
+        await snapshotWriter({ updatedAt: new Date().toISOString(), ...spot });
+      } catch (error) {
+        warnings.push(`全市场快照持久化失败：${errorText(error)}`);
+      }
+      return { spot, warnings, mode: "sina" };
     }
-    throw new Error(`Eastmoney spot coverage incomplete: ${spot.stocks.length}/${spot.total}`);
+    throw new Error(`Sina spot coverage incomplete: ${spot.stocks.length}/${spot.total}`);
   } catch (error) {
     primaryError = error;
   }
 
+  let fallbackError: unknown = null;
   try {
     const spot = await fallbackProvider();
     if (isCompleteSpotUniverse(spot.total, spot.stocks.length)) {
+      const warnings = [`新浪全市场快照失败，已切换东方财富备用源：${errorText(primaryError)}`];
+      try {
+        await snapshotWriter({ updatedAt: new Date().toISOString(), ...spot });
+      } catch (error) {
+        warnings.push(`全市场快照持久化失败：${errorText(error)}`);
+      }
       return {
         spot,
-        warnings: [
-          `东方财富全市场快照失败，已切换新浪财经公开行情接口：${primaryError instanceof Error ? primaryError.message : String(primaryError)}`
-        ],
-        mode: "sina"
+        warnings,
+        mode: "eastmoney"
       };
     }
-    throw new Error(`Sina spot coverage incomplete: ${spot.stocks.length}/${spot.total}`);
-  } catch (fallbackError) {
+    throw new Error(`Eastmoney spot coverage incomplete: ${spot.stocks.length}/${spot.total}`);
+  } catch (error) {
+    fallbackError = error;
+  }
+
+  const snapshot = await snapshotReader();
+  if (snapshot && isCompleteSpotUniverse(snapshot.total, snapshot.stocks.length)) {
     return {
-      spot: {
-        total: FALLBACK_SPOT_SEEDS.length,
-        stocks: FALLBACK_SPOT_SEEDS
-      },
+      spot: { total: snapshot.total, stocks: snapshot.stocks },
       warnings: [
-        `全市场快照刷新失败，使用本地种子池继续拉取真实日线：东方财富 ${primaryError instanceof Error ? primaryError.message : String(primaryError)}；新浪 ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+        `在线全市场快照均失败，使用 ${snapshot.updatedAt || "未知时间"} 的最近成功快照。`,
+        `新浪：${errorText(primaryError)}；东方财富：${errorText(fallbackError)}`
       ],
-      mode: "seed"
+      mode: "cache"
     };
   }
+
+  throw new Error(`无可用全市场行情。新浪：${errorText(primaryError)}；东方财富：${errorText(fallbackError)}`);
 }
 
 async function readDiskScanCache(): Promise<LiveScanResponse | null> {
@@ -363,6 +396,14 @@ async function fetchJsonBatchRaw(urls: URL[], workers = 6): Promise<BridgeResult
     });
     child.stdin.end(JSON.stringify({ urls: urls.map((url) => url.toString()), workers }));
   });
+}
+
+async function fetchJsonBatchOrErrors(urls: URL[], workers: number, source: string): Promise<BridgeResult[]> {
+  try {
+    return await fetchJsonBatchRaw(urls, workers);
+  } catch (error) {
+    return urls.map(() => ({ ok: false, error: `${source} bridge: ${errorText(error)}` }));
+  }
 }
 
 async function fetchJson(url: URL): Promise<any> {
@@ -456,18 +497,46 @@ export async function fetchSinaAshareSpot(): Promise<{ total: number; stocks: Sp
 }
 
 export async function fetchStockHistory(symbol: string, limit = 260): Promise<DailyBar[]> {
+  let tencentError: unknown = null;
+  try {
+    const response = await fetchJson(tencentHistoryUrl(symbol, limit));
+    const bars = parseTencentHistoryResponse(response, symbol);
+    if (bars.length > 0) {
+      await writeHistorySnapshot(HISTORY_SNAPSHOT_DIR, symbol, bars, "tencent");
+      return bars;
+    }
+    throw new Error("Tencent history returned empty bars");
+  } catch (error) {
+    tencentError = error;
+  }
+
+  let eastmoneyError: unknown = null;
   try {
     const response = await fetchJson(historyUrl(symbol, limit));
     const lines = Array.isArray(response.data?.klines) ? response.data.klines : [];
-    if (lines.length > 0) return lines.map((line: string) => parseEastmoneyKline(line));
-  } catch {
-    // Fall through to Tencent qfq daily bars.
+    if (lines.length > 0) {
+      const bars = lines.map((line: string) => parseEastmoneyKline(line));
+      await writeHistorySnapshot(HISTORY_SNAPSHOT_DIR, symbol, bars, "eastmoney");
+      return bars;
+    }
+    throw new Error("Eastmoney history returned empty bars");
+  } catch (error) {
+    eastmoneyError = error;
   }
-  const response = await fetchJson(tencentHistoryUrl(symbol, limit));
-  return parseTencentHistoryResponse(response, symbol);
+
+  const snapshot = await readHistorySnapshot(HISTORY_SNAPSHOT_DIR, symbol, limit);
+  if (snapshot) return snapshot.bars;
+  throw new Error(`No history for ${symbol}. Tencent: ${errorText(tencentError)}; Eastmoney: ${errorText(eastmoneyError)}`);
 }
 
 export async function fetchBenchmarkHistory(limit = 260): Promise<DailyBar[]> {
+  try {
+    const response = await fetchJson(tencentHistoryUrlByKey("sh000300", limit));
+    const bars = parseTencentHistoryResponse(response, "000300", "sh000300");
+    if (bars.length > 0) return bars;
+  } catch {
+    // Fall through to the secondary benchmark source.
+  }
   const response = await fetchJson(historyUrlBySecId(CSI300_SECID, limit));
   const lines = Array.isArray(response.data?.klines) ? response.data.klines : [];
   return lines.map((line: string) => parseEastmoneyKline(line));
@@ -492,15 +561,19 @@ function historyUrlBySecId(secid: string, limit = 260): URL {
 }
 
 function tencentHistoryUrl(symbol: string, limit = 260): URL {
+  return tencentHistoryUrlByKey(tencentSymbol(symbol), limit);
+}
+
+function tencentHistoryUrlByKey(key: string, limit = 260): URL {
   const url = new URL(TENCENT_HISTORY_URL);
   url.search = new URLSearchParams({
-    param: `${tencentSymbol(symbol)},day,,,${limit},qfq`
+    param: `${key},day,,,${limit},qfq`
   }).toString();
   return url;
 }
 
-function parseTencentHistoryResponse(response: Record<string, any>, symbol: string): DailyBar[] {
-  const key = tencentSymbol(symbol);
+function parseTencentHistoryResponse(response: Record<string, any>, symbol: string, explicitKey?: string): DailyBar[] {
+  const key = explicitKey ?? tencentSymbol(symbol);
   const rows = response.data?.[key]?.qfqday ?? response.data?.[key]?.day ?? [];
   return Array.isArray(rows) ? parseTencentQfqRows(rows) : [];
 }
@@ -509,77 +582,80 @@ type HistoryBatch = {
   rows: Array<{ stock: SpotStock; history: DailyBar[] }>;
   failedCount: number;
   errors: string[];
+  sourceCounts: Record<"tencent" | "eastmoney" | "cache", number>;
 };
 
 export function historyProviderForSpotMode(mode: SpotProviderMode): HistoryProviderMode {
-  return mode === "live" ? "eastmoney" : "tencent";
+  void mode;
+  return "tencent";
 }
 
 async function fetchTencentHistories(stocks: SpotStock[]): Promise<HistoryBatch> {
-  const responses = await fetchJsonBatchRaw(stocks.map((stock) => tencentHistoryUrl(stock.symbol)), 3);
+  const responses = await fetchJsonBatchOrErrors(stocks.map((stock) => tencentHistoryUrl(stock.symbol)), 3, "Tencent");
   const rows: Array<{ stock: SpotStock; history: DailyBar[] }> = [];
   const errors: string[] = [];
+  const sourceCounts = { tencent: 0, eastmoney: 0, cache: 0 };
+  const fallbackStocks: SpotStock[] = [];
+  const snapshotWrites: Promise<void>[] = [];
 
   responses.forEach((response, index) => {
     const stock = stocks[index];
     if (!response.ok || !response.data) {
       errors.push(`${stock.symbol} Tencent: ${response.error ?? "history request failed"}`);
+      fallbackStocks.push(stock);
       return;
     }
     const history = parseTencentHistoryResponse(response.data, stock.symbol);
     if (history.length === 0) {
       errors.push(`${stock.symbol} Tencent: empty history`);
+      fallbackStocks.push(stock);
       return;
     }
     rows.push({ stock, history });
+    sourceCounts.tencent += 1;
+    snapshotWrites.push(writeHistorySnapshot(HISTORY_SNAPSHOT_DIR, stock.symbol, history, "tencent"));
   });
+
+  if (fallbackStocks.length > 0) {
+    const fallbackResponses = await fetchJsonBatchOrErrors(fallbackStocks.map((stock) => historyUrl(stock.symbol)), 2, "Eastmoney");
+    const cacheStocks: SpotStock[] = [];
+    fallbackResponses.forEach((response, index) => {
+      const stock = fallbackStocks[index];
+      const lines = response.ok && Array.isArray(response.data?.data?.klines) ? response.data.data.klines : [];
+      if (lines.length === 0) {
+        errors.push(`${stock.symbol} Eastmoney: ${response.error ?? "empty history"}`);
+        cacheStocks.push(stock);
+        return;
+      }
+      const history = lines.map((line: string) => parseEastmoneyKline(line));
+      rows.push({ stock, history });
+      sourceCounts.eastmoney += 1;
+      snapshotWrites.push(writeHistorySnapshot(HISTORY_SNAPSHOT_DIR, stock.symbol, history, "eastmoney"));
+    });
+
+    const cachedRows = await Promise.all(
+      cacheStocks.map(async (stock) => ({ stock, snapshot: await readHistorySnapshot(HISTORY_SNAPSHOT_DIR, stock.symbol, 260) }))
+    );
+    for (const cached of cachedRows) {
+      if (!cached.snapshot) continue;
+      rows.push({ stock: cached.stock, history: cached.snapshot.bars });
+      sourceCounts.cache += 1;
+    }
+  }
+
+  await Promise.allSettled(snapshotWrites);
 
   return {
     rows,
     failedCount: stocks.length - rows.length,
-    errors
+    errors,
+    sourceCounts
   };
 }
 
 async function fetchHistories(stocks: SpotStock[], provider: HistoryProviderMode = "eastmoney"): Promise<HistoryBatch> {
-  if (provider === "tencent") {
-    return fetchTencentHistories(stocks);
-  }
-
-  const responses = await fetchJsonBatchRaw(stocks.map((stock) => historyUrl(stock.symbol)), 3);
-  const rows: Array<{ stock: SpotStock; history: DailyBar[] }> = [];
-  const errors: string[] = [];
-  const fallbackStocks: SpotStock[] = [];
-
-  responses.forEach((response, index) => {
-    if (!response.ok || !response.data) {
-      fallbackStocks.push(stocks[index]);
-      errors.push(`${stocks[index]?.symbol ?? "unknown"} Eastmoney: ${response.error ?? "history request failed"}`);
-      return;
-    }
-    const lines = Array.isArray(response.data?.klines) ? response.data.klines : [];
-    if (lines.length === 0) {
-      fallbackStocks.push(stocks[index]);
-      errors.push(`${stocks[index]?.symbol ?? "unknown"} Eastmoney: empty history`);
-      return;
-    }
-    rows.push({
-      stock: stocks[index],
-      history: lines.map((line: string) => parseEastmoneyKline(line))
-    });
-  });
-
-  if (fallbackStocks.length > 0) {
-    const fallbackBatch = await fetchTencentHistories(fallbackStocks);
-    rows.push(...fallbackBatch.rows);
-    errors.push(...fallbackBatch.errors);
-  }
-
-  return {
-    rows,
-    failedCount: stocks.length - rows.length,
-    errors
-  };
+  void provider;
+  return fetchTencentHistories(stocks);
 }
 
 export function pickTopRecommendations(analyzed: LiveScreenedStock[], displayLimit = 10): LiveScreenedStock[] {
@@ -614,28 +690,27 @@ export async function runLiveScreen(options?: {
   }
 
   const startedAt = Date.now();
-  const spotResult = await fetchSpotForScreen(fetchAshareSpot);
+  let spotResult: Awaited<ReturnType<typeof fetchSpotForScreen>>;
+  try {
+    spotResult = await fetchSpotForScreen();
+  } catch (error) {
+    const diskCache = useCache ? await readDiskScanCache() : null;
+    if (!diskCache) throw error;
+    return {
+      ...diskCache,
+      provider: "cached-public",
+      asOf: new Date().toISOString(),
+      warnings: [`在线行情源均不可用，保留最近一次成功扫描：${errorText(error)}`, ...diskCache.warnings],
+      dataSources: {
+        spot: "disk-cache",
+        history: "disk-cache",
+        historySourceCounts: { cache: diskCache.analyzedCount },
+        degraded: true
+      }
+    };
+  }
   const spot = spotResult.spot;
   const spotWarnings = spotResult.warnings;
-
-  if (spotResult.mode === "seed") {
-    if (useCache && scanCache && hasUsableScan(scanCache.value)) {
-      return {
-        ...scanCache.value,
-        asOf: new Date().toISOString(),
-        warnings: [...spotWarnings, "已使用本轮服务内最近一次成功扫描。", ...scanCache.value.warnings]
-      };
-    }
-    const diskCache = useCache ? await readDiskScanCache() : null;
-    if (diskCache) {
-      scanCache = { expiresAt: Date.now() + CACHE_TTL_MS, value: diskCache, key: cacheKey };
-      return {
-        ...diskCache,
-        asOf: new Date().toISOString(),
-        warnings: [...spotWarnings, "已使用磁盘中的最近一次成功扫描。", ...diskCache.warnings]
-      };
-    }
-  }
 
   const marketCapTopPct = options?.marketCapTopPct ?? DEFAULT_MARKET_CAP_TOP_PCT;
   const marketCapUniverse = selectMarketCapUniverse(spot.stocks, marketCapTopPct);
@@ -681,13 +756,23 @@ export async function runLiveScreen(options?: {
 
   const candidates = pickTopRecommendations(analyzed, options?.displayLimit ?? 10);
   const latestTradeDate = latestHistoryTradeDate(analyzed);
-  const provider = spotResult.mode === "sina" ? "sina-public" : spotResult.mode === "seed" ? "seed-public" : "eastmoney-public";
+  const provider = spotResult.mode === "sina" ? "sina-public" : spotResult.mode === "cache" ? "cached-public" : "eastmoney-public";
   const sourceLabel =
     spotResult.mode === "sina"
-      ? "新浪财经公开行情接口 + 东方财富/腾讯日线"
-      : spotResult.mode === "seed"
-        ? "本地种子池 + 东方财富/腾讯日线"
-        : "东方财富公开行情接口";
+      ? "新浪财经全市场快照 + 腾讯前复权日线"
+      : spotResult.mode === "cache"
+        ? "最近成功全市场快照 + 腾讯前复权日线"
+        : "东方财富备用快照 + 腾讯前复权日线";
+  const historySourceCounts = historyBatch.sourceCounts;
+  const historySourceKinds = Object.entries(historySourceCounts).filter(([, count]) => count > 0).map(([source]) => source);
+  const historySource =
+    historySourceKinds.length > 1
+      ? "mixed"
+      : historySourceCounts.cache > 0
+        ? "disk-cache"
+        : historySourceCounts.eastmoney > 0
+          ? "eastmoney-public"
+          : "tencent-public";
   const result: LiveScanResponse = {
     provider,
     sourceLabel,
@@ -704,10 +789,16 @@ export async function runLiveScreen(options?: {
     watchCount: analyzed.filter((item) => item.analysis.signalType === "watch").length,
     durationMs: Date.now() - startedAt,
     candidates,
+    dataSources: {
+      spot: spotResult.mode === "sina" ? "sina-public" : spotResult.mode === "eastmoney" ? "eastmoney-public" : "disk-cache",
+      history: historySource,
+      historySourceCounts,
+      degraded: spotResult.mode !== "sina" || historySource !== "tencent-public" || failedCount > 0
+    },
     warnings: [
       ...spotWarnings,
       ...benchmarkWarnings,
-      "公开行情接口无正式稳定性承诺，页面保留本地演示数据作为降级方案。",
+      "公开行情接口无正式稳定性承诺；在线源失败时仅使用最近一次成功落盘数据，并明确标记降级。",
       "当前扫描未接入财报中的扣非净利润、营收增速、商誉等字段。",
       latestTradeDate ? `行情日期来自最近可取得的交易日：${latestTradeDate}。` : "未能识别最近交易日。",
       ...(failedCount > 0 ? [`${failedCount} 只股票历史日线请求失败，已跳过。`, ...historyBatch.errors.slice(0, 3)] : [])

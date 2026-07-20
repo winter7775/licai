@@ -10,6 +10,8 @@ DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 NPM_BIN="${NPM_BIN:-/usr/bin/npm}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
 SUDO_BIN="${SUDO_BIN-sudo}"
+INSTALL_BIN="${INSTALL_BIN:-/usr/bin/install}"
+CHOWN_BIN="${CHOWN_BIN:-/usr/bin/chown}"
 CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
 PGREP_BIN="${PGREP_BIN:-/usr/bin/pgrep}"
 ACTIVE_JOB_WAIT_SECONDS="${ACTIVE_JOB_WAIT_SECONDS:-900}"
@@ -18,6 +20,8 @@ HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
 HEALTH_RETRY_SECONDS="${HEALTH_RETRY_SECONDS:-3}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
 LOCK_STALE_SECONDS="${LOCK_STALE_SECONDS:-60}"
+SERVICE_UNIT_SOURCE="${SERVICE_UNIT_SOURCE:-$APP_DIR/deploy/systemd/mingyuan-trading.service.example}"
+SERVICE_UNIT_TARGET="${SERVICE_UNIT_TARGET:-/etc/systemd/system/mingyuan-trading.service}"
 
 if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "Deployment requires an exact 40-character Git SHA." >&2
@@ -221,6 +225,23 @@ run_systemctl() {
   fi
 }
 
+run_privileged() {
+  if [ -n "$SUDO_BIN" ]; then
+    "$SUDO_BIN" "$@"
+  else
+    "$@"
+  fi
+}
+
+install_runtime_permissions_and_service() {
+  local app_owner
+  app_owner="$(id -un):$(id -gn)"
+  mkdir -p "$APP_DIR/data" "$APP_DIR/output"
+  run_privileged "$CHOWN_BIN" -R "$app_owner" "$APP_DIR/data" "$APP_DIR/output" || return $?
+  run_privileged "$INSTALL_BIN" -m 0644 "$SERVICE_UNIT_SOURCE" "$SERVICE_UNIT_TARGET" || return $?
+  run_systemctl daemon-reload || return $?
+}
+
 check_health() {
   local attempt
   for ((attempt = 1; attempt <= HEALTH_RETRIES; attempt += 1)); do
@@ -241,6 +262,7 @@ install_code() {
 }
 
 start_and_check() {
+  install_runtime_permissions_and_service || return $?
   run_systemctl restart "$SERVICE_NAME" || return $?
   check_health || return $?
 }

@@ -61,9 +61,13 @@ describe("shared api handlers", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["Content-Type"]).toBe("application/json; charset=utf-8");
     expect(JSON.parse(response.body)).toMatchObject({
-      provider: "eastmoney-public",
+      provider: "sina-spot/tencent-history",
       ready: true,
-      deployment: null
+      deployment: null,
+      dataSources: {
+        spot: { primary: "sina-public" },
+        history: { primary: "tencent-public" }
+      }
     });
   });
 

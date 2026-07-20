@@ -3,6 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const workflowPath = path.resolve(process.cwd(), ".github/workflows/deploy-production.yml");
+const servicePath = path.resolve(process.cwd(), "deploy/systemd/mingyuan-trading.service.example");
+const deployScriptPath = path.resolve(process.cwd(), "deploy/scripts/deploy-on-server.sh");
 
 async function readWorkflow() {
   return readFile(workflowPath, "utf-8");
@@ -58,5 +60,18 @@ describe("production deployment workflow", () => {
     expect(workflow).toContain("deployment.gitSha");
     expect(workflow).toContain("EXPECTED_SHA");
     expect(workflow).toContain("ssh mingyuan-production");
+  });
+
+  it("runs the web service and scheduled jobs as the same application user", async () => {
+    const [service, deployScript] = await Promise.all([
+      readFile(servicePath, "utf-8"),
+      readFile(deployScriptPath, "utf-8")
+    ]);
+
+    expect(service).toContain("User=ubuntu");
+    expect(service).toContain("Group=ubuntu");
+    expect(deployScript).toContain("mingyuan-trading.service.example");
+    expect(deployScript).toContain('"$CHOWN_BIN" -R');
+    expect(deployScript).toContain("daemon-reload");
   });
 });

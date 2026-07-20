@@ -12,6 +12,7 @@ import type { PaperAttributionCandidate } from "../src/domain/paperAttribution";
 import { calculatePortfolioSummary, upsertHolding, type HoldingQuote, type PortfolioHolding, type PortfolioState } from "../src/domain/portfolio";
 import {
   fetchAshareSpot,
+  fetchSpotForScreen,
   fetchStockHistory,
   readLiveScreenDiskCache,
   runLiveScreen,
@@ -53,6 +54,8 @@ const PAPER_QUOTE_TIMEOUT_MS = 5_000;
 const PAPER_HISTORY_QUOTE_TIMEOUT_MS = 4_000;
 
 let spotCache: Awaited<ReturnType<typeof fetchAshareSpot>> | null = null;
+let spotCacheSource: "sina-public" | "eastmoney-public" | "disk-cache" = "sina-public";
+let spotCacheWarnings: string[] = [];
 let spotCacheExpiresAt = 0;
 
 interface PortfolioSearchResult {
@@ -181,7 +184,10 @@ async function readJsonBody<T>(request: any): Promise<T> {
 
 async function getSpotCached(force = false): Promise<Awaited<ReturnType<typeof fetchAshareSpot>>> {
   if (!force && spotCache && spotCacheExpiresAt > Date.now()) return spotCache;
-  spotCache = await fetchAshareSpot();
+  const result = await fetchSpotForScreen();
+  spotCache = result.spot;
+  spotCacheSource = result.mode === "sina" ? "sina-public" : result.mode === "eastmoney" ? "eastmoney-public" : "disk-cache";
+  spotCacheWarnings = result.warnings;
   spotCacheExpiresAt = Date.now() + SPOT_CACHE_TTL_MS;
   return spotCache;
 }
@@ -552,7 +558,7 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
       candidateDecisions: plan.candidateDecisions,
       beforeSummary: beforeResponse.summary,
       scan: {
-        provider: scan?.provider ?? "eastmoney-public",
+        provider: scan?.provider ?? "sina-public",
         tradeDate: scan?.tradeDate ?? scanState.date,
         universeCount: scan?.universeCount ?? scanState.universeCount,
         prefilteredCount: scan?.prefilteredCount ?? scanState.prefilteredCount,
@@ -604,8 +610,8 @@ export async function runPaperBackgroundScanStep(requestUrl: URL) {
     marketCapTopPct: state.scanPolicy.marketCapTopPct / 100,
     cache: false
   });
-  if (scan.provider === "seed-public") {
-    const failed = markPaperScanError(state, "全市场行情源降级为本地种子池，本批未计入正式后台扫描。");
+  if (scan.provider === "cached-public") {
+    const failed = markPaperScanError(state, "在线行情源均不可用，本批仅保留最近成功扫描，未计入新的后台扫描进度。");
     const saved = await writePaperScanState(PAPER_SCAN_STATE_PATH, failed);
     return buildPaperTradingResponseWithScanState(saved);
   }
@@ -759,9 +765,13 @@ async function handleLiveRequest(request: any, response: any, requestUrl: URL): 
   try {
     if (requestUrl.pathname === "/api/live/health") {
       sendJson(response, 200, {
-        provider: "eastmoney-public",
-        sourceLabel: "东方财富公开行情接口",
+        provider: "sina-spot/tencent-history",
+        sourceLabel: "新浪财经全市场快照 + 腾讯前复权日线",
         ready: true,
+        dataSources: {
+          spot: { primary: "sina-public", secondary: "eastmoney-public", fallback: "disk-cache" },
+          history: { primary: "tencent-public", secondary: "eastmoney-public", fallback: "disk-cache" }
+        },
         deployment: await readDeploymentStatus(),
         checkedAt: new Date().toISOString()
       });
@@ -771,7 +781,12 @@ async function handleLiveRequest(request: any, response: any, requestUrl: URL): 
     if (requestUrl.pathname === "/api/live/spot") {
       const spot = await getSpotCached(requestUrl.searchParams.get("refresh") === "1");
       const limit = Math.min(Number(requestUrl.searchParams.get("limit") ?? 20), 100);
-      sendJson(response, 200, { total: spot.total, stocks: spot.stocks.slice(0, limit) });
+      sendJson(response, 200, {
+        total: spot.total,
+        stocks: spot.stocks.slice(0, limit),
+        source: spotCacheSource,
+        warnings: spotCacheWarnings
+      });
       return true;
     }
 
@@ -803,7 +818,7 @@ async function handleLiveRequest(request: any, response: any, requestUrl: URL): 
     sendJson(response, 502, {
       error: "LIVE_DATA_PROVIDER_ERROR",
       message: errorMessage(error),
-      fallback: "demo"
+      fallback: "last-good-cache"
     });
     return true;
   }

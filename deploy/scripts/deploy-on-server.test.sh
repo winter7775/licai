@@ -47,6 +47,8 @@ backups/
 EOF
 echo "version-one" > "$SOURCE_DIR/version.txt"
 echo '{"name":"deploy-fixture","scripts":{"build":"true"}}' > "$SOURCE_DIR/package.json"
+mkdir -p "$SOURCE_DIR/deploy/systemd"
+printf '%s\n' '[Unit]' '[Service]' 'User=ubuntu' > "$SOURCE_DIR/deploy/systemd/mingyuan-trading.service.example"
 git -C "$SOURCE_DIR" add .
 git -C "$SOURCE_DIR" commit -m "version one" >/dev/null
 git -C "$SOURCE_DIR" remote add origin "$REMOTE_DIR"
@@ -112,6 +114,7 @@ run_deploy() {
   NPM_BIN="$FAKE_BIN/npm" \
   SYSTEMCTL_BIN="$FAKE_BIN/systemctl" \
   SUDO_BIN="" \
+  SERVICE_UNIT_TARGET="$TMP_DIR/mingyuan-trading.service" \
   CURL_BIN="$FAKE_BIN/curl" \
   PGREP_BIN="$FAKE_BIN/pgrep" \
   COMMAND_LOG="$COMMAND_LOG" \

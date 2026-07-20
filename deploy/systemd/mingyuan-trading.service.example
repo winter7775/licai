@@ -5,6 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=ubuntu
+Group=ubuntu
+UMask=0022
 WorkingDirectory=/opt/mingyuan/trading-system
 Environment=NODE_ENV=production
 Environment=PORT=4173

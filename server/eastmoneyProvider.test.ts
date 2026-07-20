@@ -36,27 +36,31 @@ describe("eastmoney provider helpers", () => {
     expect(latestHistoryTradeDate(analyzed)).toBe("2026-06-05");
   });
 
-  it("falls back to a local seed universe when the full-market spot API is unavailable", async () => {
+  it("falls back to the last successful spot snapshot when both live spot APIs are unavailable", async () => {
+    const cachedStocks = Array.from({ length: 5_000 }, (_, index) => ({
+      symbol: String(index).padStart(6, "0")
+    })) as any[];
     const result = await fetchSpotForScreen(
-      async () => {
-        throw new Error("HTTP Error 502: Bad Gateway");
-      },
       async () => {
         throw new Error("Sina unavailable");
-      }
+      },
+      async () => {
+        throw new Error("Eastmoney unavailable");
+      },
+      async () => ({
+        updatedAt: "2026-07-17T07:00:00.000Z",
+        total: 5_000,
+        stocks: cachedStocks
+      })
     );
 
-    expect(result.spot.stocks.length).toBeGreaterThan(0);
-    expect(result.spot.stocks[0].symbol).toMatch(/^\d{6}$/);
-    expect(result.warnings[0]).toContain("全市场快照刷新失败");
-    expect(result.warnings[0]).toContain("本地种子池");
+    expect(result.mode).toBe("cache");
+    expect(result.spot.stocks).toHaveLength(5_000);
+    expect(result.warnings.join(" ")).toContain("2026-07-17T07:00:00.000Z");
   });
 
-  it("uses Sina full-market spot data before falling back to the local seed universe", async () => {
+  it("uses Sina as the primary full-market spot source", async () => {
     const result = await fetchSpotForScreen(
-      async () => {
-        throw new Error("HTTP Error 502: Bad Gateway");
-      },
       async () => ({
         total: 1,
         stocks: [
@@ -80,14 +84,18 @@ describe("eastmoney provider helpers", () => {
             floatMarketCap: 228589064622.68
           }
         ]
-      })
+      }),
+      async () => {
+        throw new Error("Eastmoney should not be called");
+      },
+      async () => null,
+      async () => {}
     );
 
     expect(result.mode).toBe("sina");
     expect(result.spot.total).toBe(1);
     expect(result.spot.stocks[0].symbol).toBe("000725");
-    expect(result.warnings[0]).toContain("东方财富全市场快照失败");
-    expect(result.warnings[0]).toContain("新浪财经");
+    expect(result.warnings).toEqual([]);
   });
 
   it("rejects a misleading partial Eastmoney snapshot before ranking the top 30 percent", async () => {
@@ -100,10 +108,12 @@ describe("eastmoney provider helpers", () => {
 
     const result = await fetchSpotForScreen(
       async () => ({ total: 5_533, stocks: partialStocks }),
-      async () => ({ total: 5_000, stocks: fallbackStocks })
+      async () => ({ total: 5_000, stocks: fallbackStocks }),
+      async () => null,
+      async () => {}
     );
 
-    expect(result.mode).toBe("sina");
+    expect(result.mode).toBe("eastmoney");
     expect(result.spot.stocks).toHaveLength(5_000);
   });
 
@@ -163,10 +173,10 @@ describe("eastmoney provider helpers", () => {
     expect(sinaSpotPageWorkers()).toBe(3);
   });
 
-  it("uses Tencent daily history directly after falling back to a non-Eastmoney spot universe", () => {
-    expect(historyProviderForSpotMode("live")).toBe("eastmoney");
+  it("uses Tencent as the primary daily-history source for every spot mode", () => {
+    expect(historyProviderForSpotMode("eastmoney")).toBe("tencent");
     expect(historyProviderForSpotMode("sina")).toBe("tencent");
-    expect(historyProviderForSpotMode("seed")).toBe("tencent");
+    expect(historyProviderForSpotMode("cache")).toBe("tencent");
   });
 
   it("uses the latest history bar as the live price when screening from a fallback seed", () => {
