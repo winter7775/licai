@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   alignSpotWithLatestHistory,
+  clearSpotUniverseCache,
   collectBatchPayloads,
   collectEastmoneySpotPayloads,
   collectSinaSpotPayloads,
   eastmoneySpotPageNumbers,
   fetchSpotForScreen,
+  getSpotUniverseForScreen,
   historyProviderForSpotMode,
   latestHistoryTradeDate,
   pickTopRecommendations,
@@ -15,6 +17,28 @@ import {
 import type { LiveScreenedStock } from "./eastmoneyProvider";
 
 describe("eastmoney provider helpers", () => {
+  it("reuses one full-market snapshot across scan batches until the cache expires", async () => {
+    clearSpotUniverseCache();
+    let calls = 0;
+    const result = {
+      spot: { total: 5_527, stocks: [] },
+      warnings: [],
+      mode: "sina" as const
+    };
+    const loader = async () => {
+      calls += 1;
+      return result;
+    };
+
+    await getSpotUniverseForScreen(loader, () => 1_000);
+    await getSpotUniverseForScreen(loader, () => 1_001);
+
+    expect(calls).toBe(1);
+    expect(await getSpotUniverseForScreen(loader, () => 1_000 + 10 * 60 * 1_000)).toBe(result);
+    expect(calls).toBe(2);
+    clearSpotUniverseCache();
+  });
+
   it("keeps successful batch payloads and reports failed requests", () => {
     const result = collectBatchPayloads([
       { ok: true, data: { value: 1 } },

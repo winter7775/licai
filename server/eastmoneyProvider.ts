@@ -33,6 +33,7 @@ const EASTMONEY_SPOT_PAGE_SIZE = 100;
 const EASTMONEY_SPOT_PAGE_WORKERS = 4;
 const TENCENT_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get";
 const CACHE_TTL_MS = 3 * 60 * 1000;
+const SPOT_UNIVERSE_CACHE_TTL_MS = 10 * 60 * 1000;
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(SERVER_DIR, "..");
 const PYTHON_EXE = resolvePythonExecutable({ rootDir: APP_DIR });
@@ -95,6 +96,7 @@ export type SpotProviderMode = "sina" | "eastmoney" | "cache";
 type HistoryProviderMode = "eastmoney" | "tencent";
 
 let scanCache: { expiresAt: number; value: LiveScanResponse; key: string } | null = null;
+let spotUniverseCache: { expiresAt: number; value: Awaited<ReturnType<typeof fetchSpotForScreen>> } | null = null;
 
 const FALLBACK_SPOT_SEEDS: SpotStock[] = [
   seedStock("600879", "航天电子", "军工电子", 42, 8_000_000_000, 65_000_000_000),
@@ -331,6 +333,21 @@ export async function fetchSpotForScreen(
   }
 
   throw new Error(`无可用全市场行情。新浪：${errorText(primaryError)}；东方财富：${errorText(fallbackError)}`);
+}
+
+export function clearSpotUniverseCache(): void {
+  spotUniverseCache = null;
+}
+
+export async function getSpotUniverseForScreen(
+  loader: () => Promise<Awaited<ReturnType<typeof fetchSpotForScreen>>> = fetchSpotForScreen,
+  now: () => number = Date.now
+): Promise<Awaited<ReturnType<typeof fetchSpotForScreen>>> {
+  const currentTime = now();
+  if (spotUniverseCache && spotUniverseCache.expiresAt > currentTime) return spotUniverseCache.value;
+  const value = await loader();
+  spotUniverseCache = { expiresAt: currentTime + SPOT_UNIVERSE_CACHE_TTL_MS, value };
+  return value;
 }
 
 async function readDiskScanCache(): Promise<LiveScanResponse | null> {
@@ -692,7 +709,7 @@ export async function runLiveScreen(options?: {
   const startedAt = Date.now();
   let spotResult: Awaited<ReturnType<typeof fetchSpotForScreen>>;
   try {
-    spotResult = await fetchSpotForScreen();
+    spotResult = await getSpotUniverseForScreen();
   } catch (error) {
     const diskCache = useCache ? await readDiskScanCache() : null;
     if (!diskCache) throw error;
