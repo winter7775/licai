@@ -86,7 +86,7 @@ export interface LiveScanResponse {
   };
 }
 
-interface BridgeResult {
+export interface BridgeResult {
   ok: boolean;
   data?: any;
   error?: string;
@@ -157,11 +157,21 @@ function scanCacheKey(options?: {
 }
 
 function secId(symbol: string): string {
-  return `${/^[569]/.test(symbol) ? 1 : 0}.${symbol}`;
+  return marketDataKey(symbol).eastmoney;
 }
 
 function tencentSymbol(symbol: string): string {
-  return `${/^[569]/.test(symbol) ? "sh" : "sz"}${symbol}`;
+  return marketDataKey(symbol).tencent;
+}
+
+export function marketDataKey(symbol: string): { tencent: string; eastmoney: string } {
+  const normalized = symbol.replace(/\D/g, "").padStart(6, "0").slice(-6);
+  const isBeijing = /^920/.test(normalized) || /^[48]/.test(normalized);
+  const isShanghai = !isBeijing && /^[569]/.test(normalized);
+  return {
+    tencent: `${isBeijing ? "bj" : isShanghai ? "sh" : "sz"}${normalized}`,
+    eastmoney: `${isShanghai ? 1 : 0}.${normalized}`
+  };
 }
 
 export function collectBatchPayloads(results: BridgeResult[]): {
@@ -423,6 +433,52 @@ async function fetchJsonBatchOrErrors(urls: URL[], workers: number, source: stri
   }
 }
 
+interface BatchRetryOptions<T> {
+  workers: number;
+  retryWorkers?: number;
+  retryDelayMs?: number;
+  isUsable?: (result: BridgeResult, item: T, index: number) => boolean;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
+function delay(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+export async function retryFailedBatchResults<T>(
+  items: T[],
+  fetcher: (items: T[], workers: number) => Promise<BridgeResult[]>,
+  options: BatchRetryOptions<T>
+): Promise<BridgeResult[]> {
+  if (items.length === 0) return [];
+  const isUsable = options.isUsable ?? ((result: BridgeResult) => Boolean(result.ok && result.data));
+  const initial = await fetcher(items, options.workers);
+  const results = items.map(
+    (_, index) => initial[index] ?? ({ ok: false, error: "Batch provider omitted a result" } satisfies BridgeResult)
+  );
+  const failedIndexes = results.flatMap((result, index) => (isUsable(result, items[index], index) ? [] : [index]));
+  if (failedIndexes.length === 0) return results;
+
+  await (options.sleep ?? delay)(options.retryDelayMs ?? 1_200);
+  const retryItems = failedIndexes.map((index) => items[index]);
+  const retried = await fetcher(retryItems, options.retryWorkers ?? 1);
+  failedIndexes.forEach((originalIndex, retryIndex) => {
+    const retryResult = retried[retryIndex];
+    if (!retryResult) return;
+    if (isUsable(retryResult, items[originalIndex], originalIndex)) {
+      results[originalIndex] = retryResult;
+      return;
+    }
+    const initialError = results[originalIndex].error;
+    const retryError = retryResult.error;
+    results[originalIndex] = {
+      ...retryResult,
+      error: [initialError, retryError ? `retry: ${retryError}` : "retry returned unusable data"].filter(Boolean).join("; ")
+    };
+  });
+  return results;
+}
+
 async function fetchJson(url: URL): Promise<any> {
   const batch = collectBatchPayloads(await fetchJsonBatchRaw([url], 1));
   if (batch.payloads.length === 0) {
@@ -608,7 +664,18 @@ export function historyProviderForSpotMode(mode: SpotProviderMode): HistoryProvi
 }
 
 async function fetchTencentHistories(stocks: SpotStock[]): Promise<HistoryBatch> {
-  const responses = await fetchJsonBatchOrErrors(stocks.map((stock) => tencentHistoryUrl(stock.symbol)), 3, "Tencent");
+  const requests = stocks.map((stock) => ({ stock, url: tencentHistoryUrl(stock.symbol) }));
+  const responses = await retryFailedBatchResults(
+    requests,
+    (items, workers) => fetchJsonBatchOrErrors(items.map((item) => item.url), workers, "Tencent"),
+    {
+      workers: 3,
+      retryWorkers: 1,
+      retryDelayMs: 1_200,
+      isUsable: (response, item) =>
+        Boolean(response.ok && response.data && parseTencentHistoryResponse(response.data, item.stock.symbol).length > 0)
+    }
+  );
   const rows: Array<{ stock: SpotStock; history: DailyBar[] }> = [];
   const errors: string[] = [];
   const sourceCounts = { tencent: 0, eastmoney: 0, cache: 0 };
@@ -634,7 +701,17 @@ async function fetchTencentHistories(stocks: SpotStock[]): Promise<HistoryBatch>
   });
 
   if (fallbackStocks.length > 0) {
-    const fallbackResponses = await fetchJsonBatchOrErrors(fallbackStocks.map((stock) => historyUrl(stock.symbol)), 2, "Eastmoney");
+    const fallbackRequests = fallbackStocks.map((stock) => ({ stock, url: historyUrl(stock.symbol) }));
+    const fallbackResponses = await retryFailedBatchResults(
+      fallbackRequests,
+      (items, workers) => fetchJsonBatchOrErrors(items.map((item) => item.url), workers, "Eastmoney"),
+      {
+        workers: 2,
+        retryWorkers: 1,
+        retryDelayMs: 1_200,
+        isUsable: (response) => Boolean(response.ok && Array.isArray(response.data?.data?.klines) && response.data.data.klines.length > 0)
+      }
+    );
     const cacheStocks: SpotStock[] = [];
     fallbackResponses.forEach((response, index) => {
       const stock = fallbackStocks[index];

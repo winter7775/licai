@@ -10,7 +10,9 @@ import {
   getSpotUniverseForScreen,
   historyProviderForSpotMode,
   latestHistoryTradeDate,
+  marketDataKey,
   pickTopRecommendations,
+  retryFailedBatchResults,
   selectHistoryCandidates,
   sinaSpotPageWorkers
 } from "./eastmoneyProvider";
@@ -201,6 +203,47 @@ describe("eastmoney provider helpers", () => {
     expect(historyProviderForSpotMode("eastmoney")).toBe("tencent");
     expect(historyProviderForSpotMode("sina")).toBe("tencent");
     expect(historyProviderForSpotMode("cache")).toBe("tencent");
+  });
+
+  it("routes Beijing Stock Exchange symbols to the bj market instead of Shanghai", () => {
+    expect(marketDataKey("920045")).toEqual({ tencent: "bj920045", eastmoney: "0.920045" });
+    expect(marketDataKey("600030")).toEqual({ tencent: "sh600030", eastmoney: "1.600030" });
+    expect(marketDataKey("000001")).toEqual({ tencent: "sz000001", eastmoney: "0.000001" });
+  });
+
+  it("retries only unusable history results at lower concurrency and preserves item order", async () => {
+    const calls: Array<{ items: string[]; workers: number }> = [];
+    const sleeps: number[] = [];
+    const results = await retryFailedBatchResults(
+      ["000001", "000002", "000003"],
+      async (items, workers) => {
+        calls.push({ items, workers });
+        if (calls.length === 1) {
+          return [
+            { ok: true, data: { bars: [1] } },
+            { ok: false, error: "connection reset" },
+            { ok: true, data: { bars: [] } }
+          ];
+        }
+        return items.map((item) => ({ ok: true, data: { bars: [item] } }));
+      },
+      {
+        workers: 3,
+        retryWorkers: 1,
+        retryDelayMs: 1_200,
+        isUsable: (result) => result.ok && Array.isArray(result.data?.bars) && result.data.bars.length > 0,
+        sleep: async (delayMs) => {
+          sleeps.push(delayMs);
+        }
+      }
+    );
+
+    expect(calls).toEqual([
+      { items: ["000001", "000002", "000003"], workers: 3 },
+      { items: ["000002", "000003"], workers: 1 }
+    ]);
+    expect(sleeps).toEqual([1_200]);
+    expect(results.map((result) => result.data?.bars?.[0])).toEqual([1, "000002", "000003"]);
   });
 
   it("uses the latest history bar as the live price when screening from a fallback seed", () => {
