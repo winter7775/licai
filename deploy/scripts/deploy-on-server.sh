@@ -92,8 +92,8 @@ fi
 backup_persistent_state() {
   local timestamp backup_dir
   timestamp="$(date -u +%Y%m%d-%H%M%S)"
-  backup_dir="$BACKUP_ROOT/${timestamp}-${TARGET_SHA:0:12}"
-  mkdir -p "$backup_dir"
+  mkdir -p "$BACKUP_ROOT"
+  backup_dir="$(mktemp -d "$BACKUP_ROOT/${timestamp}-${TARGET_SHA:0:12}-XXXXXX")"
 
   if [ -d "$APP_DIR/data" ]; then
     cp -a "$APP_DIR/data" "$backup_dir/data"
@@ -163,9 +163,11 @@ backup_persistent_state
 
 echo "Deploying $TARGET_SHA (previous $PREVIOUS_SHA)..."
 if install_and_start "$TARGET_SHA"; then
-  write_metadata "success" "$TARGET_SHA" "$PREVIOUS_SHA"
-  echo "Deployment succeeded: $TARGET_SHA"
-  exit 0
+  if write_metadata "success" "$TARGET_SHA" "$PREVIOUS_SHA"; then
+    echo "Deployment succeeded: $TARGET_SHA"
+    exit 0
+  fi
+  echo "Deployment metadata could not be persisted." >&2
 fi
 
 deploy_exit=$?

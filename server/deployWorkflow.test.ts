@@ -39,6 +39,11 @@ describe("production deployment workflow", () => {
     expect(workflow).toContain("secrets.DEPLOY_PORT");
     expect(workflow).toContain("secrets.DEPLOY_USER");
     expect(workflow).toContain("${{ github.sha }}");
+
+    const configureStepIndex = workflow.indexOf("Configure pinned SSH connection");
+    const privateKeySecretIndex = workflow.indexOf("DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}");
+    expect(configureStepIndex).toBeGreaterThan(-1);
+    expect(privateKeySecretIndex).toBeGreaterThan(configureStepIndex);
   });
 
   it("checks the public health endpoint and deployed SHA", async () => {

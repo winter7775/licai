@@ -17,11 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
       GITHUB_SHA: ${{ github.sha }}
 
     steps:
@@ -51,6 +46,12 @@ jobs:
           bash deploy/scripts/deploy-on-server.test.sh
 
       - name: Configure pinned SSH connection
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           for value in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
@@ -88,6 +89,8 @@ jobs:
             "chmod 700 '$REMOTE_SCRIPT' && bash '$REMOTE_SCRIPT' '$GITHUB_SHA'; result=\$?; rm -f '$REMOTE_SCRIPT'; exit \$result"
 
       - name: Verify public deployment identity
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           set -euo pipefail
           HEALTH_URL="http://${DEPLOY_HOST}:4173/api/live/health"
