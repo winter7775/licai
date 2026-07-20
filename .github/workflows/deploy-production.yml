@@ -1,0 +1,109 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mingyuan-production
+  cancel-in-progress: false
+
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      GITHUB_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test -- --run
+
+      - name: Build production application
+        run: npm run build
+
+      - name: Validate deployment scripts
+        run: |
+          bash -n deploy/scripts/deploy-on-server.sh
+          bash deploy/scripts/deploy-on-server.test.sh
+
+      - name: Configure pinned SSH connection
+        run: |
+          set -euo pipefail
+          for value in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "${!value:-}" ]; then
+              echo "Required GitHub secret is missing: $value" >&2
+              exit 1
+            fi
+          done
+
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/mingyuan_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/mingyuan_deploy" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/mingyuan_deploy" >/dev/null
+
+          cat > "$HOME/.ssh/config" <<EOF
+          Host mingyuan-production
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            Port $DEPLOY_PORT
+            IdentityFile $HOME/.ssh/mingyuan_deploy
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Deploy exact commit to Tencent Cloud
+        run: |
+          set -euo pipefail
+          REMOTE_SCRIPT="/tmp/mingyuan-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
+          scp deploy/scripts/deploy-on-server.sh "mingyuan-production:$REMOTE_SCRIPT"
+          ssh -o StrictHostKeyChecking=yes mingyuan-production \
+            "chmod 700 '$REMOTE_SCRIPT' && bash '$REMOTE_SCRIPT' '$GITHUB_SHA'; result=\$?; rm -f '$REMOTE_SCRIPT'; exit \$result"
+
+      - name: Verify public deployment identity
+        run: |
+          set -euo pipefail
+          HEALTH_URL="http://${DEPLOY_HOST}:4173/api/live/health"
+          for attempt in $(seq 1 10); do
+            if payload="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "$HEALTH_URL")"; then
+              if HEALTH_PAYLOAD="$payload" EXPECTED_SHA="$GITHUB_SHA" node -e '
+                const health = JSON.parse(process.env.HEALTH_PAYLOAD || "{}");
+                if (health.ready !== true || health.deployment?.status !== "success" || health.deployment.gitSha !== process.env.EXPECTED_SHA) {
+                  process.exit(1);
+                }
+              '; then
+                echo "Production is healthy at $GITHUB_SHA"
+                exit 0
+              fi
+            fi
+            sleep 3
+          done
+          echo "Production health did not report expected commit $GITHUB_SHA" >&2
+          exit 1
