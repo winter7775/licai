@@ -62,7 +62,8 @@ describe("shared api handlers", () => {
     expect(response.headers["Content-Type"]).toBe("application/json; charset=utf-8");
     expect(JSON.parse(response.body)).toMatchObject({
       provider: "eastmoney-public",
-      ready: true
+      ready: true,
+      deployment: null
     });
   });
 
