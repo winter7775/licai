@@ -61,13 +61,17 @@ SHA_TWO="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 
 git clone "$REMOTE_DIR" "$APP_DIR" >/dev/null
 git -C "$APP_DIR" checkout --detach "$SHA_ONE" >/dev/null
-mkdir -p "$APP_DIR/data" "$APP_DIR/output/logs" "$FAKE_BIN"
+mkdir -p "$APP_DIR/data/backtest-cache" "$APP_DIR/output/logs" "$APP_DIR/output/backtests" "$FAKE_BIN"
 echo '{"holdings":[{"code":"600000","quantity":100}]}' > "$APP_DIR/data/paper-trading.json"
+echo "rebuildable-cache" > "$APP_DIR/data/backtest-cache/history.json"
 echo "historical-log" > "$APP_DIR/output/logs/daily.log"
+echo "large-backtest-result" > "$APP_DIR/output/backtests/strict.jsonl"
 echo "WEWORK_WEBHOOK_URL=secret-value" > "$APP_DIR/.env"
 
 PAPER_SUM="$(sha256sum "$APP_DIR/data/paper-trading.json" | awk '{print $1}')"
+CACHE_SUM="$(sha256sum "$APP_DIR/data/backtest-cache/history.json" | awk '{print $1}')"
 OUTPUT_SUM="$(sha256sum "$APP_DIR/output/logs/daily.log" | awk '{print $1}')"
+BACKTEST_SUM="$(sha256sum "$APP_DIR/output/backtests/strict.jsonl" | awk '{print $1}')"
 ENV_SUM="$(sha256sum "$APP_DIR/.env" | awk '{print $1}')"
 
 cat > "$FAKE_BIN/npm" <<'EOF'
@@ -135,12 +139,18 @@ run_deploy "$SHA_TWO"
 assert_equal "$SHA_TWO" "$(git -C "$APP_DIR" rev-parse HEAD)" "exact target SHA was not deployed"
 assert_equal "version-two" "$(cat "$APP_DIR/version.txt")" "target files were not checked out"
 assert_equal "$PAPER_SUM" "$(sha256sum "$APP_DIR/data/paper-trading.json" | awk '{print $1}')" "paper account changed"
+assert_equal "$CACHE_SUM" "$(sha256sum "$APP_DIR/data/backtest-cache/history.json" | awk '{print $1}')" "backtest cache changed"
 assert_equal "$OUTPUT_SUM" "$(sha256sum "$APP_DIR/output/logs/daily.log" | awk '{print $1}')" "output history changed"
+assert_equal "$BACKTEST_SUM" "$(sha256sum "$APP_DIR/output/backtests/strict.jsonl" | awk '{print $1}')" "backtest result changed"
 assert_equal "$ENV_SUM" "$(sha256sum "$APP_DIR/.env" | awk '{print $1}')" ".env changed"
 grep -q "\"gitSha\":\"$SHA_TWO\"" "$APP_DIR/data/deployment.json" || fail "success metadata missing target SHA"
 grep -q '"status":"success"' "$APP_DIR/data/deployment.json" || fail "success metadata missing status"
 find "$APP_DIR/backups/deploy" -mindepth 1 -maxdepth 1 -type d | grep -q . || fail "deployment backup was not created"
-find "$APP_DIR/backups/deploy" -name persistent-state.tar.gz -type f | grep -q . || fail "persistent-state archive was not created"
+PERSISTENT_ARCHIVE="$(find "$APP_DIR/backups/deploy" -name persistent-state.tar.gz -type f | head -1)"
+[ -n "$PERSISTENT_ARCHIVE" ] || fail "persistent-state archive was not created"
+if tar -tzf "$PERSISTENT_ARCHIVE" | grep -Eq '^data/backtest-cache(/|$)|^output/backtests(/|$)'; then
+  fail "rebuildable backtest artifacts were included in the deployment archive"
+fi
 
 touch "$SOURCE_DIR/FAIL_BUILD"
 git -C "$SOURCE_DIR" add FAIL_BUILD
@@ -153,7 +163,9 @@ assert_equal "$SHA_TWO" "$(git -C "$APP_DIR" rev-parse HEAD)" "failed build did 
 grep -q '"status":"rolled_back"' "$APP_DIR/data/deployment.json" || fail "rollback metadata missing status"
 grep -q "\"gitSha\":\"$SHA_TWO\"" "$APP_DIR/data/deployment.json" || fail "rollback metadata missing restored SHA"
 assert_equal "$PAPER_SUM" "$(sha256sum "$APP_DIR/data/paper-trading.json" | awk '{print $1}')" "paper account changed after rollback"
+assert_equal "$CACHE_SUM" "$(sha256sum "$APP_DIR/data/backtest-cache/history.json" | awk '{print $1}')" "backtest cache changed after rollback"
 assert_equal "$OUTPUT_SUM" "$(sha256sum "$APP_DIR/output/logs/daily.log" | awk '{print $1}')" "output history changed after rollback"
+assert_equal "$BACKTEST_SUM" "$(sha256sum "$APP_DIR/output/backtests/strict.jsonl" | awk '{print $1}')" "backtest result changed after rollback"
 assert_equal "$ENV_SUM" "$(sha256sum "$APP_DIR/.env" | awk '{print $1}')" ".env changed after rollback"
 [ ! -e "$APP_DIR/output/logs/temporary.log" ] || fail "temporary output survived rollback"
 

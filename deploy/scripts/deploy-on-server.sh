@@ -164,7 +164,10 @@ backup_persistent_state() {
   fi
 
   if (( ${#entries[@]} > 0 )); then
-    tar -czf "$PERSISTENT_BACKUP" -C "$APP_DIR" "${entries[@]}"
+    tar -czf "$PERSISTENT_BACKUP" \
+      --exclude='data/backtest-cache' \
+      --exclude='output/backtests' \
+      -C "$APP_DIR" "${entries[@]}"
   else
     tar -czf "$PERSISTENT_BACKUP" --files-from /dev/null
   fi
@@ -179,14 +182,35 @@ backup_persistent_state() {
 }
 
 restore_persistent_state() {
+  local preserved_root
   if [ ! -f "$PERSISTENT_BACKUP" ]; then
     echo "Persistent-state backup is unavailable; refusing an unsafe restore." >&2
     return 1
   fi
 
+  preserved_root="$(mktemp -d "$DEPLOY_STATE_DIR/preserved-state-XXXXXX")"
+  if [ -d "$APP_DIR/data/backtest-cache" ]; then
+    mkdir -p "$preserved_root/data"
+    mv "$APP_DIR/data/backtest-cache" "$preserved_root/data/backtest-cache"
+  fi
+  if [ -d "$APP_DIR/output/backtests" ]; then
+    mkdir -p "$preserved_root/output"
+    mv "$APP_DIR/output/backtests" "$preserved_root/output/backtests"
+  fi
+
   rm -rf -- "$APP_DIR/data" "$APP_DIR/output"
   rm -f -- "$APP_DIR/.env"
   tar -xzf "$PERSISTENT_BACKUP" -C "$APP_DIR"
+
+  if [ -d "$preserved_root/data/backtest-cache" ]; then
+    mkdir -p "$APP_DIR/data"
+    mv "$preserved_root/data/backtest-cache" "$APP_DIR/data/backtest-cache"
+  fi
+  if [ -d "$preserved_root/output/backtests" ]; then
+    mkdir -p "$APP_DIR/output"
+    mv "$preserved_root/output/backtests" "$APP_DIR/output/backtests"
+  fi
+  rm -rf -- "$preserved_root"
 }
 
 run_systemctl() {

@@ -132,8 +132,11 @@ The workflow can also be rerun with **Run workflow** (`workflow_dispatch`) witho
 changing code. A red run with `rolled_back` means the old version is serving again;
 inspect the Actions log before retrying. Runtime `data/`, `.env`, and `output/`
 are snapshotted while the service is stopped and restored after every build, so
-package scripts cannot silently mutate them. The ten newest compressed snapshots
-are kept under `/opt/mingyuan/trading-system/backups/deploy/`.
+package scripts cannot silently mutate them. Rebuildable `data/backtest-cache/`
+and large `output/backtests/` artifacts stay in place but are excluded from the
+compressed rollback archive, keeping the service interruption short. The ten
+newest compressed snapshots are kept under
+`/opt/mingyuan/trading-system/backups/deploy/`.
 
 Deployments, daily jobs, and backtests share `.deploy/operation.lock`. A release
 waits while a calculation is active; a newly started calculation refuses to run
