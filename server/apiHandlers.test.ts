@@ -204,6 +204,59 @@ describe("shared api handlers", () => {
     expect(response.quoteStatus.warnings.some((warning) => warning.includes("行情快照"))).toBe(true);
   });
 
+  it("prefers the latest trading-day close over a stale paper quote snapshot", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "paper-api-latest-close-"));
+    const snapshotPath = path.join(tempDir, "paper-quote-snapshot.json");
+    await writePaperQuoteSnapshot(snapshotPath, {
+      updatedAt: "2026-07-17T07:00:00.000Z",
+      quotes: { "002422": 37.31 },
+      previousCloses: { "002422": 37 }
+    });
+    const account: PaperAccount = {
+      initialCapital: 200000,
+      cash: 195000,
+      holdings: [
+        {
+          symbol: "002422",
+          name: "科伦药业",
+          industry: "医药",
+          quantity: 100,
+          avgCost: 37.31,
+          initialStopPrice: 36.94,
+          stopPrice: 36.94,
+          highestPriceSinceEntry: 44.72,
+          takeProfitPrice: 52.23,
+          openedAt: "2026-07-01T07:00:00.000Z",
+          updatedAt: "2026-07-01T07:00:00.000Z",
+          reason: "test"
+        }
+      ],
+      trades: [],
+      reviews: [],
+      updatedAt: "2026-07-01T07:00:00.000Z"
+    };
+
+    const response = await buildPaperTradingResponse(account, {
+      quoteSnapshotPath: snapshotPath,
+      spotProvider: () => new Promise(() => {}),
+      quoteTimeoutMs: 5,
+      historyProvider: async () =>
+        [
+          { date: "2026-07-17", close: 43.95 },
+          { date: "2026-07-20", close: 44.72 }
+        ] as any
+    });
+
+    expect(response.summary.holdings[0]).toMatchObject({
+      currentPrice: 44.72,
+      previousClose: 43.95,
+      todayPnl: 77,
+      unrealizedPnl: 741
+    });
+    expect(response.quoteStatus.warnings.some((warning) => warning.includes("最近日线收盘价"))).toBe(true);
+    expect(response.quoteStatus.warnings.some((warning) => warning.includes("暂用成本价"))).toBe(false);
+  });
+
   it("rejects long-running optional work with a timeout", async () => {
     await expect(withTimeout(new Promise(() => {}), 5, "too slow")).rejects.toThrow("too slow");
   });

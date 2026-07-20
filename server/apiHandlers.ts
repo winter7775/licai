@@ -405,9 +405,11 @@ export async function buildPaperTradingResponse(
     quoteTimeoutMs?: number;
     quoteSnapshotPath?: string;
     spotProvider?: PaperSpotProvider;
+    historyProvider?: typeof fetchStockHistory;
   }
 ) {
   const warnings: string[] = [];
+  let spotRefreshError: string | null = null;
   let quotes: Record<string, number> = {};
   let previousCloses: Record<string, number> = {};
   const scanState = await readCurrentPaperScanState();
@@ -427,7 +429,21 @@ export async function buildPaperTradingResponse(
       previousCloses = paperPreviousClosesFromSpot(spot.stocks, holdingSymbols);
     }
   } catch (error) {
-    warnings.push(`模拟盘现价刷新失败，暂用成本价估算：${errorMessage(error)}`);
+    spotRefreshError = errorMessage(error);
+  }
+
+  if (shouldFetchPaperQuotes(holdingSymbols) && options?.useHistoryFallback !== false) {
+    const filled = await fillMissingPaperQuotePrices(
+      holdingSymbols,
+      quotes,
+      previousCloses,
+      options?.historyProvider ?? fetchStockHistory
+    );
+    quotes = filled.quotes;
+    previousCloses = filled.previousCloses;
+    if (filled.filledSymbols.length > 0) {
+      warnings.push(`部分持仓实时现价缺失，已使用最近日线收盘价估值：${filled.filledSymbols.join(", ")}`);
+    }
   }
 
   const snapshotFilled = fillQuotesFromSnapshot(holdingSymbols, quotes, previousCloses, quoteSnapshot);
@@ -437,20 +453,21 @@ export async function buildPaperTradingResponse(
     warnings.push(`持仓实时行情不可用，已沿用最近一次有效行情快照估值：${snapshotFilled.filledSymbols.join(", ")}`);
   }
 
-  if (shouldFetchPaperQuotes(holdingSymbols) && options?.useHistoryFallback !== false) {
-    const filled = await fillMissingPaperQuotePrices(holdingSymbols, quotes, previousCloses);
-    quotes = filled.quotes;
-    previousCloses = filled.previousCloses;
-    if (filled.filledSymbols.length > 0) {
-      warnings.push(`部分持仓实时现价缺失，已使用最近日线收盘价估值：${filled.filledSymbols.join(", ")}`);
-    }
-    if (filled.missingSymbols.length > 0) {
-      warnings.push(`部分持仓仍缺少行情，暂用成本价估算：${filled.missingSymbols.join(", ")}`);
-    }
-  } else if (shouldFetchPaperQuotes(holdingSymbols)) {
-    const missingSymbols = holdingSymbols.filter((symbol) => !quotes[symbol] || quotes[symbol] <= 0);
-    if (missingSymbols.length > 0) {
+  const missingSymbols = holdingSymbols.filter((symbol) => !quotes[symbol] || quotes[symbol] <= 0);
+  if (spotRefreshError) {
+    const hasFallbackQuotes = missingSymbols.length < holdingSymbols.length;
+    warnings.unshift(
+      hasFallbackQuotes
+        ? `盘中实时行情刷新失败，已优先使用最近交易日收盘价或行情快照估值：${spotRefreshError}`
+        : `盘中实时行情刷新失败：${spotRefreshError}`
+    );
+  }
+
+  if (missingSymbols.length > 0) {
+    if (options?.useHistoryFallback === false) {
       warnings.push(`持仓行情快速刷新未取全，先返回本地模拟盘数据，缺失现价暂用成本价：${missingSymbols.join(", ")}`);
+    } else {
+      warnings.push(`部分持仓仍缺少行情，暂用成本价估算：${missingSymbols.join(", ")}`);
     }
   }
 
