@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readPaperBackgroundScan, resetPaperBackgroundScan, runPaperBackgroundScanStep, runPaperTradingCycle } from "./apiHandlers";
+import { runWithOperationLock } from "./operationLock";
 
 const DEFAULT_BATCH_SIZE = 40;
 const DEFAULT_MAX_BATCHES = 20;
@@ -440,7 +441,7 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  runDailyJob()
+  runWithOperationLock("daily-job", () => runDailyJob())
     .then((summary) => {
       console.log(JSON.stringify(summary, null, 2));
     })

@@ -40,6 +40,105 @@ Open:
 http://SERVER_IP:4173/
 ```
 
+## Hands-Off Production Releases
+
+After the one-time setup below, every verified push to `main` deploys the exact
+Git commit to the Tencent Cloud server. The workflow runs the full test suite,
+production build, deployment-script tests, a consistent runtime snapshot,
+service restart, and both authenticated server and public reachability checks.
+A failed build or health check restores both the previous working commit and the
+pre-deploy runtime snapshot automatically.
+
+### 1. Create A Dedicated Deployment Key
+
+Create this key on a trusted computer. Do not reuse a personal SSH key. Leave the
+passphrase empty because GitHub Actions runs without an interactive prompt.
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-mingyuan-production" -f ~/.ssh/mingyuan_github_actions
+```
+
+This creates:
+
+- `~/.ssh/mingyuan_github_actions`: private key, used only for the GitHub secret.
+- `~/.ssh/mingyuan_github_actions.pub`: public key, authorized on the server.
+
+Do not paste the private key into chat, a commit, a log, or the server repository.
+
+### 2. Authorize Only The Public Key On Tencent Cloud
+
+Log in once as the deployment user (`ubuntu` in the current server), then append
+the `.pub` line. The optional `restrict` prefix disables SSH forwarding and PTY
+features that this deployment does not need.
+
+```bash
+install -d -m 700 ~/.ssh
+printf '%s\n' 'restrict ssh-ed25519 REPLACE_WITH_PUBLIC_KEY github-actions-mingyuan-production' >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+sudo -n /usr/bin/systemctl status mingyuan-trading >/dev/null
+```
+
+The last command must complete without asking for a password. The deployment
+script only needs permission to stop, start, and restart `mingyuan-trading`; do
+not expose the application's `.env` or Enterprise WeChat webhook.
+
+### 3. Record The Real Server Host Key
+
+Read the host key on the server itself so GitHub Actions can reject an unexpected
+machine. For the current public IP and default SSH port, run:
+
+```bash
+sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+printf '159.75.41.16 %s\n' "$(sudo awk '{print $1 " " $2}' /etc/ssh/ssh_host_ed25519_key.pub)"
+```
+
+Save the complete second output line as `DEPLOY_KNOWN_HOSTS`. If SSH later moves
+away from port `22`, use `[159.75.41.16]:NEW_PORT` at the start of that line.
+
+### 4. Add Five GitHub Actions Secrets
+
+Open `winter7775/licai` on GitHub, then go to **Settings > Secrets and variables >
+Actions > New repository secret**. Add exactly these names:
+
+| Secret | Current value |
+| --- | --- |
+| `DEPLOY_HOST` | `159.75.41.16` |
+| `DEPLOY_PORT` | `22` unless the Tencent Cloud SSH port was changed |
+| `DEPLOY_USER` | `ubuntu` |
+| `DEPLOY_SSH_KEY` | Complete contents of the dedicated private key |
+| `DEPLOY_KNOWN_HOSTS` | Host-key line produced on the server |
+
+When the GitHub CLI is already authenticated on the trusted computer, the private
+key can be sent without printing it to the terminal:
+
+```bash
+gh secret set DEPLOY_SSH_KEY --repo winter7775/licai < ~/.ssh/mingyuan_github_actions
+```
+
+Use the GitHub settings form for the other four values, or pipe them to `gh secret
+set` in the same way. Never place secret values directly in a shell-history command.
+
+### 5. Normal Release And Recovery
+
+Normal releases require no Tencent Cloud login:
+
+1. Merge or push a verified commit to `main`.
+2. Open the repository's **Actions > Deploy production** page to see verification,
+   deployment, rollback, and public-health status.
+3. Confirm the workflow's authenticated SSH check reports the exact commit and
+   the public `http://159.75.41.16:4173/api/live/health` endpoint is reachable.
+
+The workflow can also be rerun with **Run workflow** (`workflow_dispatch`) without
+changing code. A red run with `rolled_back` means the old version is serving again;
+inspect the Actions log before retrying. Runtime `data/`, `.env`, and `output/`
+are snapshotted while the service is stopped and restored after every build, so
+package scripts cannot silently mutate them. The ten newest compressed snapshots
+are kept under `/opt/mingyuan/trading-system/backups/deploy/`.
+
+Deployments, daily jobs, and backtests share `.deploy/operation.lock`. A release
+waits while a calculation is active; a newly started calculation refuses to run
+while deployment owns the lock. Dead-process locks are recovered automatically.
+
 ## Daily Job Test
 
 Run once manually after the first deploy:
@@ -56,7 +155,10 @@ Expected outputs:
 - `output/logs/daily-job-YYYY-MM-DD.json`
 - `output/logs/daily-job-YYYY-MM-DD.txt`
 
-## Data Backup Before Updates
+## Emergency Manual Update
+
+The automatic workflow already backs up runtime data. Use this manual path only
+when GitHub Actions is unavailable and the incident has been reviewed.
 
 ```bash
 cd /opt/mingyuan/trading-system

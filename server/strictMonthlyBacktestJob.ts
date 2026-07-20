@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchStockHistory } from "./eastmoneyProvider";
 import { loadRoughBacktestBenchmark, loadRoughBacktestSpot } from "./roughMonteCarloJob";
+import { runWithOperationLock } from "./operationLock";
 import { selectMarketCapUniverse, type DailyBar, type SpotStock } from "../src/live/marketScreener";
 import {
   runStrictMonthlyBacktestLazy,
@@ -454,7 +455,7 @@ export async function runStrictMonthlyBacktestJob(): Promise<{
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runStrictMonthlyBacktestJob()
+  runWithOperationLock(FULL_MODE ? "strict-full-backtest" : "strict-monthly-backtest", () => runStrictMonthlyBacktestJob())
     .then((result) => {
       process.stdout.write(
         JSON.stringify(

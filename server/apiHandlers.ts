@@ -36,6 +36,7 @@ import {
 } from "./paperQuoteStore";
 import { readPaperTradingDb, writePaperTradingDb } from "./paperTradingStore";
 import { readPortfolioDb, writePortfolioDb } from "./portfolioStore";
+import { readDeploymentStatus } from "./deploymentStatus";
 
 const PORTFOLIO_DB_PATH = path.resolve(process.cwd(), "data/portfolio.json");
 const PAPER_TRADING_DB_PATH = path.resolve(process.cwd(), "data/paper-trading.json");
@@ -761,6 +762,7 @@ async function handleLiveRequest(request: any, response: any, requestUrl: URL): 
         provider: "eastmoney-public",
         sourceLabel: "东方财富公开行情接口",
         ready: true,
+        deployment: await readDeploymentStatus(),
         checkedAt: new Date().toISOString()
       });
       return true;
