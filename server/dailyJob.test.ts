@@ -26,7 +26,10 @@ describe("daily cloud job", () => {
         calls.push("paper");
         return {
           run: {
-            beforeSummary: { totalAssets: 200000 },
+            beforeSummary: {
+              totalAssets: 200100,
+              holdings: [{ symbol: "600001", name: "测试持仓", quantity: 100, todayPnl: 100, todayPnlPct: 1 }]
+            },
             trades: [{ side: "buy", symbol: "600000", name: "浦发银行", quantity: 100, price: 10, amount: 1000, reason: "测试买入" }]
           },
           summary: {
@@ -49,7 +52,8 @@ describe("daily cloud job", () => {
                 weightPct: 0.55
               }
             ]
-          }
+          },
+          quoteStatus: { mode: "live", warnings: [] }
         };
       },
       notify: async () => {
@@ -77,7 +81,15 @@ describe("daily cloud job", () => {
       now: new Date("2026-06-18T17:10:00+08:00"),
       loadScan: async () => {
         calls.push("load");
-        return { scanState: { date: "2026-06-18", status: "complete", analyzedCount: 397, cursor: 400 } };
+        return {
+          scanState: {
+            date: "2026-06-18",
+            status: "complete",
+            analyzedCount: 397,
+            cursor: 400,
+            attribution: { strictEligibleCount: 0, nearMissCount: 1 }
+          }
+        };
       },
       resetScan: async () => {
         calls.push("reset");
@@ -90,8 +102,36 @@ describe("daily cloud job", () => {
       runPaper: async () => {
         calls.push("paper");
         return {
-          run: { beforeSummary: { totalAssets: 200000 }, trades: [] },
-          summary: { totalAssets: 200000, totalReturn: 0, totalReturnPct: 0, exposurePct: 0, holdings: [] }
+          run: {
+            beforeSummary: {
+              totalAssets: 200350,
+              holdings: [{ symbol: "600000", name: "浦发银行", quantity: 100, todayPnl: 350, todayPnlPct: 3.5 }]
+            },
+            trades: [],
+            review: { decisions: ["本轮没有符合硬性交易规则的标的，未强行建仓。"] }
+          },
+          summary: {
+            totalAssets: 200350,
+            totalReturn: 350,
+            totalReturnPct: 0.18,
+            exposurePct: 5,
+            holdings: [
+              {
+                symbol: "600000",
+                name: "浦发银行",
+                quantity: 100,
+                avgCost: 10,
+                currentPrice: 13.5,
+                marketValue: 1350,
+                todayPnl: 350,
+                todayPnlPct: 3.5,
+                unrealizedPnl: 350,
+                unrealizedPnlPct: 35,
+                weightPct: 0.67
+              }
+            ]
+          },
+          quoteStatus: { mode: "live", warnings: [] }
         };
       },
       notify: async () => {
@@ -107,6 +147,69 @@ describe("daily cloud job", () => {
     expect(result.scanCompleted).toBe(true);
     expect(result.scanBatches).toBe(0);
     expect(result.analyzedCount).toBe(397);
+    expect(result.strictEligibleCount).toBe(0);
+    expect(result.nearMissCount).toBe(1);
+    expect(result.paper?.dailyPnl).toBe(350);
+    expect(result.paper?.dailyPnlPct).toBe(0.18);
+    expect(result.paper?.noTradeReasons).toContain("按本轮有效行情，当前持仓未触发系统退出条件");
+    expect(result.paper?.noTradeReasons).toContain("本轮没有符合硬性交易规则的标的，未强行建仓。");
+    const markdown = buildDailyJobMarkdown(result);
+    expect(markdown).toContain("买点：严格可买 0 只 / 接近可买 1 只");
+    expect(markdown).toContain("原因：按本轮有效行情，当前持仓未触发系统退出条件");
+  });
+
+  it("reports unknown daily pnl when holding-level previous-close data is missing", async () => {
+    const result = await runDailyJob({
+      now: new Date("2026-06-18T17:10:00+08:00"),
+      loadScan: async () => ({ scanState: { date: "2026-06-18", status: "complete", analyzedCount: 400 } }),
+      runPaper: async () => ({
+        run: { beforeSummary: { totalAssets: 200000 }, trades: [] },
+        summary: {
+          totalAssets: 200000,
+          totalReturn: 0,
+          totalReturnPct: 0,
+          exposurePct: 5,
+          holdings: [{ symbol: "600000", name: "浦发银行", quantity: 100, todayPnl: null }]
+        },
+        quoteStatus: { mode: "fallback", warnings: ["昨收数据缺失"] }
+      }),
+      notify: async () => false,
+      writeLog: async () => undefined
+    });
+
+    expect(result.paper?.dailyPnl).toBeNull();
+    expect(result.paper?.dailyPnlPct).toBeNull();
+    expect(result.paper?.noTradeReasons).toContain("持仓行情不完整，退出条件未完整校验");
+    expect(buildDailyJobMarkdown(result)).toContain("今日盈亏：未知 / 未知");
+  });
+
+  it("reports the real skip reason when a strict candidate is not bought", async () => {
+    const result = await runDailyJob({
+      now: new Date("2026-06-18T17:10:00+08:00"),
+      loadScan: async () => ({
+        scanState: {
+          date: "2026-06-18",
+          status: "complete",
+          analyzedCount: 400,
+          attribution: { strictEligibleCount: 1, nearMissCount: 0 }
+        }
+      }),
+      runPaper: async () => ({
+        run: {
+          beforeSummary: { totalAssets: 200000, holdings: [] },
+          trades: [],
+          candidateDecisions: [{ symbol: "600000", name: "浦发银行", action: "skip", reason: "市场仓位上限不足" }],
+          review: { decisions: ["本轮没有符合硬性交易规则的标的，未强行建仓。"] }
+        },
+        summary: { totalAssets: 200000, totalReturn: 0, totalReturnPct: 0, exposurePct: 100, holdings: [] },
+        quoteStatus: { mode: "live", warnings: [] }
+      }),
+      notify: async () => false,
+      writeLog: async () => undefined
+    });
+
+    expect(result.paper?.noTradeReasons).toContain("候选未执行：市场仓位上限不足（1只）");
+    expect(result.paper?.noTradeReasons).not.toContain("本轮没有符合硬性交易规则的标的，未强行建仓。");
   });
 
   it("writes compact log details instead of full scan candidate payloads", async () => {
@@ -174,6 +277,7 @@ describe("daily cloud job", () => {
         dailyPnlPct: 0.17,
         quoteMode: "live",
         quoteWarnings: [],
+        noTradeReasons: [],
         holdings: [
           {
             symbol: "600961",
@@ -182,6 +286,8 @@ describe("daily cloud job", () => {
             avgCost: 28.27,
             currentPrice: 29.1,
             marketValue: 5820,
+            todayPnl: 80,
+            todayPnlPct: 1.39,
             unrealizedPnl: 166,
             unrealizedPnlPct: 2.94,
             weightPct: 2.89
@@ -207,6 +313,7 @@ describe("daily cloud job", () => {
     expect(markdown).toContain("累计盈亏：+1,250 / +0.63%");
     expect(markdown).toContain("当前持仓");
     expect(markdown).toContain("600961 株冶集团");
+    expect(markdown).toContain("今日 +80 / +1.39%");
     expect(markdown).toContain("浮盈亏 +166 / +2.94%");
     expect(markdown).toContain("今日交易");
     expect(markdown).toContain("买入 600961 株冶集团");

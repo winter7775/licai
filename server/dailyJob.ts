@@ -16,6 +16,11 @@ interface ScanResponseLike {
     status?: ScanStatus | string;
     analyzedCount?: number;
     cursor?: number;
+    attribution?: {
+      strictEligibleCount?: number;
+      nearMissCount?: number;
+      diagnosis?: string;
+    };
   };
 }
 
@@ -23,6 +28,13 @@ interface PaperRunLike {
   run?: {
     trades?: PaperTradeLike[];
     beforeSummary?: PaperSummaryLike;
+    review?: {
+      decisions?: string[];
+    };
+    candidateDecisions?: Array<{
+      action?: string;
+      reason?: string;
+    }>;
   };
   summary?: PaperSummaryLike;
   quoteStatus?: {
@@ -48,6 +60,8 @@ interface PaperHoldingLike {
   avgCost?: number;
   currentPrice?: number;
   marketValue?: number;
+  todayPnl?: number | null;
+  todayPnlPct?: number | null;
   unrealizedPnl?: number;
   unrealizedPnlPct?: number;
   weightPct?: number;
@@ -74,6 +88,7 @@ export interface DailyPaperReport {
   dailyPnlPct: number | null;
   quoteMode?: string;
   quoteWarnings: string[];
+  noTradeReasons: string[];
   holdings: Array<{
     symbol: string;
     name: string;
@@ -81,6 +96,8 @@ export interface DailyPaperReport {
     avgCost: number | null;
     currentPrice: number | null;
     marketValue: number | null;
+    todayPnl: number | null;
+    todayPnlPct: number | null;
     unrealizedPnl: number | null;
     unrealizedPnlPct: number | null;
     weightPct: number | null;
@@ -101,6 +118,8 @@ export interface DailyJobSummary {
   scanCompleted: boolean;
   scanBatches: number;
   analyzedCount: number;
+  strictEligibleCount?: number | null;
+  nearMissCount?: number | null;
   paperRan: boolean;
   tradeCount: number;
   exposurePct: number | null;
@@ -153,12 +172,42 @@ function analyzedCount(response: ScanResponseLike): number {
 }
 
 function numberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 function round(value: number, digits = 2): number {
   return Number(value.toFixed(digits));
+}
+
+function sumHoldingTodayPnl(summary: PaperSummaryLike | undefined): number | null {
+  if (!summary || !Array.isArray(summary.holdings)) return null;
+  const holdings = summary.holdings;
+  if (holdings.length === 0) return 0;
+  const values = holdings.map((holding) => numberOrNull(holding.todayPnl));
+  if (values.some((value) => value === null)) return null;
+  return round(values.reduce<number>((sum, value) => sum + (value ?? 0), 0));
+}
+
+function uniqueTexts(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function candidateSkipReasonTexts(response: PaperRunLike): string[] {
+  const counts = new Map<string, number>();
+  for (const decision of response.run?.candidateDecisions ?? []) {
+    const reason = decision.action === "skip" ? decision.reason?.trim() : "";
+    if (!reason) continue;
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-CN"))
+    .map(([reason, count]) => `候选未执行：${reason}（${count}只）`);
+}
+
+function conflictsWithStrictCandidate(reason: string): boolean {
+  return reason.includes("没有符合硬性交易规则") || reason.includes("未出现满足开仓条件");
 }
 
 function formatNumber(value: number | null): string {
@@ -181,13 +230,42 @@ function formatSignedPct(value: number | null): string {
   return `${value > 0 ? "+" : ""}${formatNumber(value)}%`;
 }
 
-function buildPaperReport(response: PaperRunLike | null): DailyPaperReport | undefined {
+function buildPaperReport(response: PaperRunLike | null, strictEligibleCount: number | null): DailyPaperReport | undefined {
   const summary = response?.summary;
   if (!summary) return undefined;
   const totalAssets = numberOrNull(summary.totalAssets);
-  const beforeTotalAssets = numberOrNull(response?.run?.beforeSummary?.totalAssets);
-  const dailyPnl = totalAssets !== null && beforeTotalAssets !== null ? round(totalAssets - beforeTotalAssets) : null;
-  const dailyPnlPct = dailyPnl !== null && beforeTotalAssets !== null && beforeTotalAssets > 0 ? round((dailyPnl / beforeTotalAssets) * 100) : null;
+  const dailyPnl = sumHoldingTodayPnl(response?.run?.beforeSummary ?? summary);
+  const startOfDayAssets = dailyPnl !== null && totalAssets !== null ? totalAssets - dailyPnl : null;
+  const dailyPnlPct =
+    dailyPnl !== null && startOfDayAssets !== null && startOfDayAssets > 0
+      ? round((dailyPnl / startOfDayAssets) * 100)
+      : null;
+  const trades = response?.run?.trades ?? [];
+  const holdingCount = response?.run?.beforeSummary?.holdings?.length ?? summary.holdings?.length ?? 0;
+  const quoteReliable = response?.quoteStatus?.mode === "live" && (response.quoteStatus.warnings?.length ?? 0) === 0;
+  const exitReason =
+    holdingCount > 0
+      ? quoteReliable
+        ? "按本轮有效行情，当前持仓未触发系统退出条件"
+        : "持仓行情不完整，退出条件未完整校验"
+      : undefined;
+  const candidateReasons = response ? candidateSkipReasonTexts(response) : [];
+  const reviewReasons = (response?.run?.review?.decisions ?? []).filter(
+    (reason) => strictEligibleCount === null || strictEligibleCount <= 0 || !conflictsWithStrictCandidate(reason)
+  );
+  const missingCandidateReason =
+    strictEligibleCount !== null && strictEligibleCount > 0 && candidateReasons.length === 0
+      ? `严格可买 ${strictEligibleCount} 只，但候选跳过原因缺失`
+      : undefined;
+  const noTradeReasons =
+    trades.length > 0
+      ? []
+      : uniqueTexts([
+          exitReason,
+          ...candidateReasons,
+          missingCandidateReason,
+          ...reviewReasons
+        ]).slice(0, 4);
 
   return {
     totalAssets,
@@ -200,6 +278,7 @@ function buildPaperReport(response: PaperRunLike | null): DailyPaperReport | und
     dailyPnlPct,
     quoteMode: response?.quoteStatus?.mode,
     quoteWarnings: response?.quoteStatus?.warnings ?? [],
+    noTradeReasons,
     holdings: (summary.holdings ?? []).slice(0, 5).map((holding) => ({
       symbol: holding.symbol ?? "",
       name: holding.name ?? "",
@@ -207,11 +286,13 @@ function buildPaperReport(response: PaperRunLike | null): DailyPaperReport | und
       avgCost: numberOrNull(holding.avgCost),
       currentPrice: numberOrNull(holding.currentPrice),
       marketValue: numberOrNull(holding.marketValue),
+      todayPnl: numberOrNull(holding.todayPnl),
+      todayPnlPct: numberOrNull(holding.todayPnlPct),
       unrealizedPnl: numberOrNull(holding.unrealizedPnl),
       unrealizedPnlPct: numberOrNull(holding.unrealizedPnlPct),
       weightPct: numberOrNull(holding.weightPct)
     })),
-    trades: (response?.run?.trades ?? []).slice(0, 5).map((trade) => ({
+    trades: trades.slice(0, 5).map((trade) => ({
       side: trade.side ?? "",
       symbol: trade.symbol ?? "",
       name: trade.name ?? "",
@@ -231,7 +312,9 @@ function compactDetail(step: string, response: ScanResponseLike | PaperRunLike) 
         status: response.scanState?.status ?? "unknown",
         date: response.scanState?.date ?? "unknown",
         analyzedCount: response.scanState?.analyzedCount ?? 0,
-        cursor: response.scanState?.cursor ?? 0
+        cursor: response.scanState?.cursor ?? 0,
+        strictEligibleCount: response.scanState?.attribution?.strictEligibleCount ?? null,
+        nearMissCount: response.scanState?.attribution?.nearMissCount ?? null
       }
     };
   }
@@ -242,10 +325,7 @@ function compactDetail(step: string, response: ScanResponseLike | PaperRunLike) 
       tradeCount: response.run?.trades?.length ?? 0,
       exposurePct: response.summary?.exposurePct ?? null,
       totalAssets: response.summary?.totalAssets ?? null,
-      dailyPnl:
-        response.summary?.totalAssets !== undefined && response.run?.beforeSummary?.totalAssets !== undefined
-          ? round(response.summary.totalAssets - response.run.beforeSummary.totalAssets)
-          : null
+      dailyPnl: sumHoldingTodayPnl(response.run?.beforeSummary ?? response.summary)
     }
   };
 }
@@ -263,6 +343,13 @@ export function buildDailyJobMarkdown(summary: DailyJobSummary): string {
     `> 当前仓位：${exposure}`,
     `> 完成时间：${summary.finishedAt}`
   ];
+  if (summary.strictEligibleCount !== undefined && summary.strictEligibleCount !== null) {
+    lines.splice(
+      4,
+      0,
+      `> 买点：严格可买 ${summary.strictEligibleCount} 只 / 接近可买 ${summary.nearMissCount ?? "未知"} 只`
+    );
+  }
 
   if (summary.paper) {
     const paper = summary.paper;
@@ -292,7 +379,9 @@ export function buildDailyJobMarkdown(summary: DailyJobSummary): string {
             holding.avgCost
           )} / 现价 ${formatNumber(holding.currentPrice)} / 市值 ${formatNumber(holding.marketValue)} / 浮盈亏 ${formatSignedNumber(
             holding.unrealizedPnl
-          )} / ${formatSignedPct(holding.unrealizedPnlPct)} / 仓位 ${formatPct(holding.weightPct)}`
+          )} / ${formatSignedPct(holding.unrealizedPnlPct)} / 今日 ${formatSignedNumber(holding.todayPnl)} / ${formatSignedPct(
+            holding.todayPnlPct
+          )} / 仓位 ${formatPct(holding.weightPct)}`
         );
       }
     }
@@ -300,6 +389,9 @@ export function buildDailyJobMarkdown(summary: DailyJobSummary): string {
     lines.push("", "## 今日交易");
     if (paper.trades.length === 0) {
       lines.push("> 今日无新增交易");
+      for (const reason of paper.noTradeReasons) {
+        lines.push(`> 原因：${reason}`);
+      }
     } else {
       for (const [index, trade] of paper.trades.entries()) {
         const side = trade.side === "sell" ? "卖出" : "买入";
@@ -349,6 +441,8 @@ export async function writeDailyJobLog(summary: DailyJobSummary, detail: unknown
       `scanCompleted: ${summary.scanCompleted}`,
       `scanBatches: ${summary.scanBatches}`,
       `analyzedCount: ${summary.analyzedCount}`,
+      `strictEligibleCount: ${summary.strictEligibleCount ?? "unknown"}`,
+      `nearMissCount: ${summary.nearMissCount ?? "unknown"}`,
       `paperRan: ${summary.paperRan}`,
       `tradeCount: ${summary.tradeCount}`,
       `exposurePct: ${summary.exposurePct ?? "unknown"}`,
@@ -418,13 +512,18 @@ export async function runDailyJob(input?: Partial<DailyJobDeps>): Promise<DailyJ
     scanCompleted: isScanComplete(scanResponse),
     scanBatches,
     analyzedCount: analyzedCount(scanResponse),
+    strictEligibleCount: numberOrNull(scanResponse.scanState?.attribution?.strictEligibleCount),
+    nearMissCount: numberOrNull(scanResponse.scanState?.attribution?.nearMissCount),
     paperRan: paperResponse !== null,
     tradeCount: paperResponse?.run?.trades?.length ?? 0,
     exposurePct: paperResponse?.summary?.exposurePct ?? null,
     startedAt,
     finishedAt: new Date().toISOString(),
     notificationSent: false,
-    paper: buildPaperReport(paperResponse)
+    paper: buildPaperReport(
+      paperResponse,
+      numberOrNull(scanResponse.scanState?.attribution?.strictEligibleCount)
+    )
   };
   try {
     summary.notificationSent = await deps.notify(summary);
