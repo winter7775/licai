@@ -552,6 +552,7 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
         trades: [],
         review: existingReview,
         beforeSummary: beforeResponse.summary,
+        beforeQuoteStatus: beforeResponse.quoteStatus,
         skipped: true,
         skipReason: "paper trading already reviewed for this date"
       }
@@ -591,6 +592,7 @@ export async function runPaperTradingCycle(options?: { force?: boolean; oncePerD
       review: plan.review,
       candidateDecisions: plan.candidateDecisions,
       beforeSummary: beforeResponse.summary,
+      beforeQuoteStatus: beforeResponse.quoteStatus,
       scan: {
         provider: scan?.provider ?? "sina-public",
         tradeDate: scan?.tradeDate ?? scanState.date,

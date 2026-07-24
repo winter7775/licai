@@ -28,10 +28,17 @@ interface PaperRunLike {
   run?: {
     trades?: PaperTradeLike[];
     beforeSummary?: PaperSummaryLike;
+    beforeQuoteStatus?: {
+      mode?: string;
+      warnings?: string[];
+    };
+    skipped?: boolean;
+    skipReason?: string;
     review?: {
       decisions?: string[];
     };
     candidateDecisions?: Array<{
+      grade?: string;
       action?: string;
       reason?: string;
     }>;
@@ -194,10 +201,15 @@ function uniqueTexts(values: Array<string | undefined>): string[] {
   return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
 }
 
-function candidateSkipReasonTexts(response: PaperRunLike): string[] {
+function candidateSkipReasonTexts(response: PaperRunLike, strictEligibleCount: number | null): string[] {
+  const skipped = (response.run?.candidateDecisions ?? []).filter(
+    (decision) => decision.action === "skip" && Boolean(decision.reason?.trim())
+  );
+  const strictSkipped = skipped.filter((decision) => decision.grade === "A");
+  const relevant = strictEligibleCount !== null && strictEligibleCount > 0 && strictSkipped.length > 0 ? strictSkipped : skipped;
   const counts = new Map<string, number>();
-  for (const decision of response.run?.candidateDecisions ?? []) {
-    const reason = decision.action === "skip" ? decision.reason?.trim() : "";
+  for (const decision of relevant) {
+    const reason = decision.reason?.trim();
     if (!reason) continue;
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
@@ -208,6 +220,14 @@ function candidateSkipReasonTexts(response: PaperRunLike): string[] {
 
 function conflictsWithStrictCandidate(reason: string): boolean {
   return reason.includes("没有符合硬性交易规则") || reason.includes("未出现满足开仓条件");
+}
+
+function paperSkipReason(response: PaperRunLike): string | undefined {
+  if (!response.run?.skipped) return undefined;
+  if (response.run.skipReason === "paper trading already reviewed for this date") {
+    return "本交易日已完成模拟复盘，未重复执行交易";
+  }
+  return response.run.skipReason?.trim() || "本轮模拟交易已跳过";
 }
 
 function formatNumber(value: number | null): string {
@@ -242,14 +262,16 @@ function buildPaperReport(response: PaperRunLike | null, strictEligibleCount: nu
       : null;
   const trades = response?.run?.trades ?? [];
   const holdingCount = response?.run?.beforeSummary?.holdings?.length ?? summary.holdings?.length ?? 0;
-  const quoteReliable = response?.quoteStatus?.mode === "live" && (response.quoteStatus.warnings?.length ?? 0) === 0;
+  const decisionQuoteStatus = response?.run?.beforeQuoteStatus ?? response?.quoteStatus;
+  const quoteReliable = decisionQuoteStatus?.mode === "live" && (decisionQuoteStatus.warnings?.length ?? 0) === 0;
   const exitReason =
     holdingCount > 0
       ? quoteReliable
         ? "按本轮有效行情，当前持仓未触发系统退出条件"
         : "持仓行情不完整，退出条件未完整校验"
       : undefined;
-  const candidateReasons = response ? candidateSkipReasonTexts(response) : [];
+  const skipReason = response ? paperSkipReason(response) : undefined;
+  const candidateReasons = response ? candidateSkipReasonTexts(response, strictEligibleCount) : [];
   const reviewReasons = (response?.run?.review?.decisions ?? []).filter(
     (reason) => strictEligibleCount === null || strictEligibleCount <= 0 || !conflictsWithStrictCandidate(reason)
   );
@@ -260,6 +282,8 @@ function buildPaperReport(response: PaperRunLike | null, strictEligibleCount: nu
   const noTradeReasons =
     trades.length > 0
       ? []
+      : skipReason
+        ? [skipReason]
       : uniqueTexts([
           exitReason,
           ...candidateReasons,

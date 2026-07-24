@@ -163,7 +163,11 @@ describe("daily cloud job", () => {
       now: new Date("2026-06-18T17:10:00+08:00"),
       loadScan: async () => ({ scanState: { date: "2026-06-18", status: "complete", analyzedCount: 400 } }),
       runPaper: async () => ({
-        run: { beforeSummary: { totalAssets: 200000 }, trades: [] },
+        run: {
+          beforeSummary: { totalAssets: 200000 },
+          beforeQuoteStatus: { mode: "fallback", warnings: ["昨收数据缺失"] },
+          trades: []
+        },
         summary: {
           totalAssets: 200000,
           totalReturn: 0,
@@ -171,7 +175,7 @@ describe("daily cloud job", () => {
           exposurePct: 5,
           holdings: [{ symbol: "600000", name: "浦发银行", quantity: 100, todayPnl: null }]
         },
-        quoteStatus: { mode: "fallback", warnings: ["昨收数据缺失"] }
+        quoteStatus: { mode: "live", warnings: [] }
       }),
       notify: async () => false,
       writeLog: async () => undefined
@@ -198,7 +202,11 @@ describe("daily cloud job", () => {
         run: {
           beforeSummary: { totalAssets: 200000, holdings: [] },
           trades: [],
-          candidateDecisions: [{ symbol: "600000", name: "浦发银行", action: "skip", reason: "市场仓位上限不足" }],
+          candidateDecisions: [
+            { symbol: "600000", name: "浦发银行", grade: "A", action: "skip", reason: "市场仓位上限不足" },
+            { symbol: "000001", name: "平安银行", grade: "B", action: "skip", reason: "V4 已关闭 B 级试错" },
+            { symbol: "000002", name: "万科A", grade: "B", action: "skip", reason: "V4 已关闭 B 级试错" }
+          ],
           review: { decisions: ["本轮没有符合硬性交易规则的标的，未强行建仓。"] }
         },
         summary: { totalAssets: 200000, totalReturn: 0, totalReturnPct: 0, exposurePct: 100, holdings: [] },
@@ -209,7 +217,40 @@ describe("daily cloud job", () => {
     });
 
     expect(result.paper?.noTradeReasons).toContain("候选未执行：市场仓位上限不足（1只）");
+    expect(result.paper?.noTradeReasons).not.toContain("候选未执行：V4 已关闭 B 级试错（2只）");
     expect(result.paper?.noTradeReasons).not.toContain("本轮没有符合硬性交易规则的标的，未强行建仓。");
+  });
+
+  it("reports a same-day repeat as skipped without reusing old trade decisions", async () => {
+    const result = await runDailyJob({
+      now: new Date("2026-06-18T17:10:00+08:00"),
+      loadScan: async () => ({
+        scanState: {
+          date: "2026-06-18",
+          status: "complete",
+          analyzedCount: 400,
+          attribution: { strictEligibleCount: 1, nearMissCount: 0 }
+        }
+      }),
+      runPaper: async () => ({
+        run: {
+          beforeSummary: { totalAssets: 201000, holdings: [] },
+          beforeQuoteStatus: { mode: "live", warnings: [] },
+          trades: [],
+          skipped: true,
+          skipReason: "paper trading already reviewed for this date",
+          review: { decisions: ["600000 浦发银行：已按严格规则模拟买入"] },
+          candidateDecisions: [{ symbol: "600000", name: "浦发银行", grade: "A", action: "buy", reason: "严格规则通过" }]
+        },
+        summary: { totalAssets: 201000, totalReturn: 1000, totalReturnPct: 0.5, exposurePct: 10, holdings: [] },
+        quoteStatus: { mode: "live", warnings: [] }
+      }),
+      notify: async () => false,
+      writeLog: async () => undefined
+    });
+
+    expect(result.paper?.noTradeReasons).toEqual(["本交易日已完成模拟复盘，未重复执行交易"]);
+    expect(result.paper?.noTradeReasons).not.toContain("600000 浦发银行：已按严格规则模拟买入");
   });
 
   it("writes compact log details instead of full scan candidate payloads", async () => {
